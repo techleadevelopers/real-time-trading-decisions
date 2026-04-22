@@ -1,7 +1,7 @@
 use crate::{
     config::Config,
     metrics::Metrics,
-    types::{FillEvent, LearningSample, OrderIntent, OrderType, Side},
+    types::{FillEvent, FlowSignal, LearningSample, OrderIntent, OrderType, Side, TimingSignal},
 };
 use std::{sync::Arc, time::Instant};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -85,7 +85,19 @@ pub async fn run(
 }
 
 fn choose_order_type(intent: &mut OrderIntent) {
-    if intent.urgency > 0.64 || intent.expected_duration_ms < 180 || intent.request.reduce_only {
+    if intent.flow.signal == FlowSignal::ReversalRisk
+        || intent.timing.signal == TimingSignal::Missed
+    {
+        intent.request.order_type = OrderType::Market;
+        intent.request.post_only = false;
+        intent.request.reduce_only = true;
+        return;
+    }
+    if intent.urgency > 0.64
+        || intent.expected_duration_ms < 180
+        || intent.request.reduce_only
+        || intent.flow.signal == FlowSignal::StrongContinuation && intent.timing.timing_score > 0.72
+    {
         intent.request.order_type = OrderType::Market;
         intent.request.post_only = false;
         return;
@@ -106,10 +118,14 @@ async fn paper_submit(
     started: Instant,
 ) -> Result<FillEvent, ()> {
     let reference = intent.request.price.unwrap_or(intent.last_price);
+    let adverse_selection = adverse_selection_score(intent);
+    if adverse_selection > 0.78 && !intent.request.reduce_only {
+        return Err(());
+    }
     let market_pressure = if intent.request.order_type == OrderType::Market {
         intent.urgency * 2.5
     } else {
-        -0.35
+        -0.35 - intent.timing.spread_compression * 0.30
     };
     let side_sign = match intent.request.side {
         Side::Buy => 1.0,
@@ -122,8 +138,8 @@ async fn paper_submit(
     }
     let fill_ratio = match intent.request.order_type {
         OrderType::Market => 1.0,
-        OrderType::Limit if intent.urgency > 0.40 => 0.65,
-        OrderType::Limit => 0.35,
+        OrderType::Limit if intent.urgency > 0.40 => 0.55 + intent.timing.timing_score * 0.20,
+        OrderType::Limit => 0.25 + intent.timing.timing_score * 0.25,
     };
     let filled_size = child_size * fill_ratio;
     let remaining_size = (child_size - filled_size).max(0.0);
@@ -166,7 +182,10 @@ async fn paper_submit(
 fn cancel_replace(intent: &mut OrderIntent, remaining: f64) {
     intent.request.size = remaining;
     intent.request.post_only = false;
-    intent.request.order_type = if intent.urgency > 0.45 {
+    intent.request.order_type = if intent.urgency > 0.45
+        || intent.flow.signal == FlowSignal::Exhaustion
+        || intent.timing.signal == TimingSignal::Missed
+    {
         OrderType::Market
     } else {
         OrderType::Limit
@@ -198,8 +217,34 @@ fn learning_sample(intent: &OrderIntent, fill: &FillEvent) -> LearningSample {
         expected_slippage_bps: fill.expected_slippage_bps,
         actual_slippage_bps: fill.actual_slippage_bps,
         pnl: markout - fill.fee,
+        duration_ms: (fill.latency_us / 1_000).max(1),
+        entry_quality: intent
+            .meta
+            .as_ref()
+            .map(|meta| meta.entry_quality)
+            .unwrap_or(intent.timing.timing_score),
         regime: intent.regime.clone(),
     }
+}
+
+fn adverse_selection_score(intent: &OrderIntent) -> f64 {
+    let flow_risk = match intent.flow.signal {
+        FlowSignal::ReversalRisk => 1.0,
+        FlowSignal::Exhaustion => 0.72,
+        FlowSignal::WeakContinuation => 0.35,
+        FlowSignal::StrongContinuation => 0.0,
+    };
+    let timing_risk = match intent.timing.signal {
+        TimingSignal::Missed => 1.0,
+        TimingSignal::Wait => 0.55,
+        TimingSignal::Neutral => 0.25,
+        TimingSignal::Optimal => 0.0,
+    };
+    (0.45 * flow_risk
+        + 0.30 * timing_risk
+        + 0.15 * intent.expected_slippage_bps / intent.request.max_slippage_bps.max(1.0)
+        + 0.10 * (1.0 - intent.context.stability_score))
+        .clamp(0.0, 1.0)
 }
 
 fn order_type_label(order_type: OrderType) -> &'static str {
