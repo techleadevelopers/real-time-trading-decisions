@@ -1,7 +1,7 @@
 use crate::{
     metrics::Metrics,
     model::LogisticFilter,
-    types::{Decision, Event, FeatureFrame, ScoredDecision},
+    types::{Decision, Direction, Event, FeatureFrame, MarketRegime, ScoredDecision},
 };
 use std::{sync::Arc, time::Instant};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -50,14 +50,27 @@ pub async fn run(
             .with_label_values(&["decision"])
             .observe(started.elapsed().as_micros() as f64);
 
+        let expected_slippage_bps = frame.market.spread * 10_000.0 * 0.5;
         let output = ScoredDecision {
             market: frame.market,
             event: frame.event,
             features: frame.features,
+            regime: MarketRegime::default(),
+            direction: match frame.event {
+                Event::PumpDetected => Direction::Long,
+                Event::DumpDetected => Direction::Short,
+                Event::Neutral => Direction::Flat,
+            },
+            confidence: ((filtered_score - 0.5).abs() * 2.0).clamp(0.0, 1.0),
             continuation_prob,
             reversal_prob,
             score: filtered_score,
             decision,
+            expected_duration_ms: 500,
+            urgency: (filtered_score - 0.65).max(0.0).clamp(0.0, 1.0),
+            expected_slippage_bps,
+            data_latency_ms: 0,
+            adversarial_risk: 0.0,
         };
         if tx.try_send(output.clone()).is_err() {
             metrics
