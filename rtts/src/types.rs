@@ -196,6 +196,35 @@ pub struct MarketRegime {
     pub trend_strength: f64,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RegimeKind {
+    #[default]
+    Normal,
+    HighVolatility,
+    NewsShock,
+    LowLiquidity,
+    TrendExpansion,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MarketContext {
+    pub regime: RegimeKind,
+    pub volatility: f64,
+    pub liquidity_score: f64,
+    pub stability_score: f64,
+}
+
+impl Default for MarketContext {
+    fn default() -> Self {
+        Self {
+            regime: RegimeKind::Normal,
+            volatility: 0.0,
+            liquidity_score: 1.0,
+            stability_score: 1.0,
+        }
+    }
+}
+
 impl Position {
     #[inline]
     pub fn is_open(&self) -> bool {
@@ -244,6 +273,7 @@ pub struct MicrostructureFrame {
     pub tape: TapeState,
     pub features: Features,
     pub regime: MarketRegime,
+    pub context: MarketContext,
     pub stale: bool,
 }
 
@@ -253,6 +283,7 @@ pub struct ScoredDecision {
     pub event: Event,
     pub features: Features,
     pub regime: MarketRegime,
+    pub context: MarketContext,
     pub direction: Direction,
     pub confidence: f64,
     pub continuation_prob: f64,
@@ -297,6 +328,7 @@ pub struct OrderIntent {
     pub expected_duration_ms: u64,
     pub data_latency_ms: u64,
     pub regime: MarketRegime,
+    pub context: MarketContext,
     pub meta: Option<MetaDecision>,
 }
 
