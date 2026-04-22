@@ -1,6 +1,9 @@
 use crate::{
     metrics::Metrics,
-    types::{FillEvent, OrderIntent, Side},
+    types::{
+        ExecutionMode, FillEvent, MarkoutSnapshot, MicroExitSignal, OrderIntent, QueueEstimate,
+        Side,
+    },
 };
 use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -67,6 +70,10 @@ async fn paper_submit(intent: &OrderIntent) -> Result<FillEvent, ()> {
         latency_us: 0,
         expected_slippage_bps: intent.expected_slippage_bps,
         actual_slippage_bps: slip_bps.abs(),
+        queue_estimate: QueueEstimate::default(),
+        execution_mode: ExecutionMode::Aggressive,
+        micro_exit: MicroExitSignal::default(),
+        markout: MarkoutSnapshot::default(),
         complete: true,
     })
 }
