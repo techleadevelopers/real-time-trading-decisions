@@ -1,6 +1,6 @@
 # Scalp Sniper RTTS
 
-Production-oriented Rust skeleton for an event-driven crypto scalp engine. It is intentionally not candle based: every decision is derived from trade and L2 order book events flowing through bounded async channels.
+Production-oriented Rust skeleton for a microstructure-aware crypto scalp engine. It is intentionally not candle based: every decision is derived from raw trade prints and L2 book deltas flowing through bounded async channels.
 
 ## Structure
 
@@ -8,19 +8,25 @@ Production-oriented Rust skeleton for an event-driven crypto scalp engine. It is
 rtts/
   Cargo.toml
   src/
-    main.rs          # CLI, tracing, pipeline start
-    config.rs        # runtime config and risk knobs
-    ingestion.rs     # Binance websocket or deterministic mock feed
-    event_engine.rs  # millisecond sliding-window pump/dump detection
-    features.rs      # velocity, volume z-score, imbalance, vol, spread
-    decision.rs      # direction-aware score and model filter
-    model.rs         # lightweight logistic filter
-    position.rs      # one evolving position with scale-in logic
-    risk.rs          # hard trade risk, DD, kill-switch checks
-    execution.rs     # non-blocking paper execution with retry/slippage
-    metrics.rs       # Prometheus text endpoint
-    pipeline.rs      # bounded mpsc wiring
-    types.rs         # shared domain structs
+    main.rs             # CLI, tracing, pipeline start
+    config.rs           # runtime config, latency, and risk knobs
+    ingestion.rs        # Binance websocket or deterministic mock feed
+    orderbook.rs        # delta L2 book, walls, spoof/pull/absorption
+    tape.rs             # aggressive flow, delta, bursts, exhaustion
+    microstructure.rs   # normalized features and regime classification
+    adaptive_engine.rs  # dynamic scoring and adversarial defense
+    scenario_simulator.rs # continuation/reversal/chop outcome estimates
+    ev_calculator.rs    # slippage/latency-adjusted expected value
+    entry_quality.rs    # timing/liquidity/orderflow execution score
+    competition_model.rs # opportunity crowding and consumed-edge risk
+    meta_engine.rs      # final judge: execute, wait, or skip
+    learning.rs         # exponential online threshold/weight updates
+    position.rs         # one evolving position with scale/decay logic
+    risk.rs             # hard risk, stale-data, DD, kill-switch checks
+    execution_smart.rs  # market/limit choice, partial fill, replace
+    metrics.rs          # Prometheus text endpoint
+    pipeline.rs         # bounded mpsc wiring
+    types.rs            # shared domain structs
 ```
 
 ## Run
@@ -55,20 +61,30 @@ $env:RTTS_DAILY_DD_PCT="0.02"
 $env:RTTS_BASE_ORDER_USD="25"
 $env:RTTS_MAX_ENTRIES="4"
 $env:RTTS_STOP_LOSS_BPS="25"
+$env:RTTS_MAX_DATA_AGE_MS="250"
+$env:RTTS_MAX_DECISION_LATENCY_US="1500"
+$env:RTTS_MAX_EXECUTION_LATENCY_US="8000"
+$env:RTTS_MAX_CONSECUTIVE_LOSSES="3"
 ```
 
 ## Pipeline
 
-1. `ingestion` emits compact `MarketEvent` structs from trades plus latest L2 spread/imbalance.
-2. `event_engine` detects pump/dump/neutral in a millisecond sliding window.
-3. `features` computes microstructure features without heap-heavy per-event allocations.
-4. `decision` produces a continuous score in `[0, 1]` and applies a simple logistic filter.
-5. `position` treats entries and scale-ins as one evolving position, never separate trades.
-6. `risk` rejects orders that breach risk, drawdown, notional, or kill-switch constraints.
-7. `execution` paper-fills orders with controlled slippage and sends fills back to `position`.
-8. `metrics` exposes latency histograms, counters, position size, drawdown, and backpressure.
+1. `ingestion` emits raw `TradeEvent` and `BookDelta` updates. Binance depth updates are applied as deltas; mock mode generates deterministic book/trade pressure.
+2. `orderbook` maintains bid/ask depth by price tick and computes total depth, top pressure, weighted imbalance, liquidity clusters, spoofing, liquidity pulls, and absorption.
+3. `tape` tracks aggressive buy/sell volume, delta, trade frequency, volume bursts, exhaustion, and continuation.
+4. `microstructure` normalizes features online and emits a `MarketRegime` with volatility, spread, and trend strength.
+5. `adaptive_engine` uses dynamic weights driven by regime, spread, and recent hit rate; it outputs direction, confidence, urgency, expected duration, and pre-trade slippage.
+6. `position` treats entries and scale-ins as one evolving position. It scales only with rising confidence, aligned order flow, and liquidity support; weak signals decay exposure.
+7. `risk` rejects stale, over-budget, over-risk, and abnormal orders before meta evaluation.
+8. `meta_engine` is the final judge. It simulates continuation, reversal, and chop; computes slippage/latency-adjusted EV; scores entry quality; estimates competition; waits for confirmation when needed; then returns execute, wait, or skip.
+9. `execution_smart` chooses market vs limit only after the meta decision approves the order, then simulates queue/partial fills, cancels/replaces, records slippage, and feeds learning samples back.
+10. `learning` adjusts thresholds and feature weights with exponential reward-style updates.
+11. `metrics` exposes stage/execution latency, adjusted EV, entry quality, competition score, skipped/executed decisions, slippage, microtrade PnL, hit rate by regime, scale efficiency, position size, drawdown, and backpressure.
 
 ## Safety Notes
 
-This crate defaults to paper execution. Real execution should be added behind the `execution` module boundary with persistent authenticated exchange sessions, exchange-native order acknowledgements, idempotent client order IDs, and reconciliation before any capital is exposed.
+This crate defaults to paper execution. Real execution should be added behind the execution module boundary with persistent authenticated exchange sessions, exchange-native order acknowledgements, idempotent client order IDs, and reconciliation before any capital is exposed.
 
+## Reality Check
+
+This is a professional architecture skeleton, not a colocated HFT stack. It still loses to serious firms on exchange proximity, private market data, queue position modeling, hardware timestamping, kernel bypass networking, and production OMS/reconciliation depth. Treat the adaptive model as a control layer for paper/forward testing until execution telemetry proves the edge survives fees, queue loss, adverse selection, and real exchange throttles.
