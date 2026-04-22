@@ -117,6 +117,43 @@ pub enum Decision {
     Exit,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FlowSignal {
+    StrongContinuation,
+    #[default]
+    WeakContinuation,
+    Exhaustion,
+    ReversalRisk,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct FlowState {
+    pub signal: FlowSignal,
+    pub aggressive_ratio: f64,
+    pub absorption: f64,
+    pub exhaustion: f64,
+    pub continuation_strength: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TimingSignal {
+    Optimal,
+    #[default]
+    Neutral,
+    Wait,
+    Missed,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct MicroTimingState {
+    pub signal: TimingSignal,
+    pub spread_compression: f64,
+    pub liquidity_pull: f64,
+    pub trade_burst: f64,
+    pub micro_pullback: f64,
+    pub timing_score: f64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ScenarioType {
     Continuation,
@@ -274,6 +311,8 @@ pub struct MicrostructureFrame {
     pub features: Features,
     pub regime: MarketRegime,
     pub context: MarketContext,
+    pub flow: FlowState,
+    pub timing: MicroTimingState,
     pub stale: bool,
 }
 
@@ -284,6 +323,8 @@ pub struct ScoredDecision {
     pub features: Features,
     pub regime: MarketRegime,
     pub context: MarketContext,
+    pub flow: FlowState,
+    pub timing: MicroTimingState,
     pub direction: Direction,
     pub confidence: f64,
     pub continuation_prob: f64,
@@ -329,6 +370,8 @@ pub struct OrderIntent {
     pub data_latency_ms: u64,
     pub regime: MarketRegime,
     pub context: MarketContext,
+    pub flow: FlowState,
+    pub timing: MicroTimingState,
     pub meta: Option<MetaDecision>,
 }
 
@@ -358,5 +401,7 @@ pub struct LearningSample {
     pub expected_slippage_bps: f64,
     pub actual_slippage_bps: f64,
     pub pnl: f64,
+    pub duration_ms: u64,
+    pub entry_quality: f64,
     pub regime: MarketRegime,
 }
