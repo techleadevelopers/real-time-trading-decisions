@@ -7,7 +7,10 @@ use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use serde::Deserialize;
-use std::{sync::Arc, time::{Duration, SystemTime, UNIX_EPOCH}};
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tokio::sync::mpsc::Sender;
 use tokio_tungstenite::connect_async;
 use tracing::{info, warn};
@@ -21,7 +24,7 @@ pub async fn run(cfg: Config, tx: Sender<MarketEvent>, metrics: Arc<Metrics>) ->
 
 async fn mock_feed(tx: Sender<MarketEvent>, metrics: Arc<Metrics>) -> Result<()> {
     let mut rng = StdRng::seed_from_u64(42);
-    let mut price = 67_000.0;
+    let mut price: f64 = 67_000.0;
     let mut interval = tokio::time::interval(Duration::from_millis(10));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -33,7 +36,11 @@ async fn mock_feed(tx: Sender<MarketEvent>, metrics: Arc<Metrics>) -> Result<()>
             rng.gen_range(-2.5..2.5)
         };
         price = (price + impulse).max(1.0);
-        let side = if impulse >= 0.0 { Side::Buy } else { Side::Sell };
+        let side = if impulse >= 0.0 {
+            Side::Buy
+        } else {
+            Side::Sell
+        };
         let event = MarketEvent {
             timestamp: now_ms(),
             price,
@@ -59,7 +66,9 @@ async fn binance_feed(cfg: Config, tx: Sender<MarketEvent>, metrics: Arc<Metrics
 
     loop {
         info!(url, "connecting websocket");
-        let (stream, _) = connect_async(&url).await.context("binance websocket connect")?;
+        let (stream, _) = connect_async(&url)
+            .await
+            .context("binance websocket connect")?;
         let (_, mut read) = stream.split();
 
         while let Some(message) = read.next().await {
@@ -204,4 +213,3 @@ fn now_ms() -> u64 {
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
 }
-
