@@ -12,7 +12,9 @@ __pycache__/
 *.sqlite3
 *.db
 *.db-journal
-
+frontend 
+/frontend
+.frontend/
 # Virtual environment
 venv/
 env/
