@@ -1,6 +1,6 @@
 use crate::{
-    config::Config, decision, event_engine, execution, features, ingestion, metrics::Metrics,
-    position, risk,
+    adaptive_engine, config::Config, execution_smart, ingestion, meta_engine, metrics::Metrics,
+    microstructure, position, risk,
 };
 use anyhow::{Context, Result};
 use std::{net::SocketAddr, sync::Arc};
@@ -8,13 +8,14 @@ use tokio::sync::mpsc;
 use tracing::info;
 
 pub async fn run(cfg: Config, metrics: Arc<Metrics>) -> Result<()> {
-    let (market_tx, market_rx) = mpsc::channel(cfg.channel_capacity);
-    let (event_tx, event_rx) = mpsc::channel(cfg.channel_capacity);
-    let (feature_tx, feature_rx) = mpsc::channel(cfg.channel_capacity);
+    let (update_tx, update_rx) = mpsc::channel(cfg.channel_capacity);
+    let (micro_tx, micro_rx) = mpsc::channel(cfg.channel_capacity);
     let (decision_tx, decision_rx) = mpsc::channel(cfg.channel_capacity);
     let (intent_tx, intent_rx) = mpsc::channel(cfg.channel_capacity);
     let (risk_tx, risk_rx) = mpsc::channel(cfg.channel_capacity);
+    let (meta_tx, meta_rx) = mpsc::channel(cfg.channel_capacity);
     let (fill_tx, fill_rx) = mpsc::channel(cfg.channel_capacity);
+    let (learning_tx, learning_rx) = mpsc::channel(cfg.channel_capacity);
 
     let metrics_addr: SocketAddr = cfg
         .metrics_addr
@@ -22,19 +23,20 @@ pub async fn run(cfg: Config, metrics: Arc<Metrics>) -> Result<()> {
         .context("invalid RTTS_METRICS_ADDR")?;
     tokio::spawn(metrics.clone().serve(metrics_addr));
 
-    tokio::spawn(event_engine::run(
+    tokio::spawn(microstructure::run(
         cfg.window_ms,
-        market_rx,
-        event_tx,
+        cfg.max_data_age_ms,
+        update_rx,
+        micro_tx,
         metrics.clone(),
     ));
-    tokio::spawn(features::run(
-        cfg.window_ms,
-        event_rx,
-        feature_tx,
+    tokio::spawn(adaptive_engine::run(
+        cfg.clone(),
+        micro_rx,
+        learning_rx,
+        decision_tx,
         metrics.clone(),
     ));
-    tokio::spawn(decision::run(feature_rx, decision_tx, metrics.clone()));
     tokio::spawn(position::run(
         cfg.clone(),
         decision_rx,
@@ -43,8 +45,20 @@ pub async fn run(cfg: Config, metrics: Arc<Metrics>) -> Result<()> {
         metrics.clone(),
     ));
     tokio::spawn(risk::run(cfg.clone(), intent_rx, risk_tx, metrics.clone()));
-    tokio::spawn(execution::run(risk_rx, fill_tx, metrics.clone()));
+    tokio::spawn(meta_engine::run(
+        cfg.clone(),
+        risk_rx,
+        meta_tx,
+        metrics.clone(),
+    ));
+    tokio::spawn(execution_smart::run(
+        cfg.clone(),
+        meta_rx,
+        fill_tx,
+        learning_tx,
+        metrics.clone(),
+    ));
 
     info!(addr = %metrics_addr, "metrics endpoint listening at /metrics");
-    ingestion::run(cfg, market_tx, metrics).await
+    ingestion::run(cfg, update_tx, metrics).await
 }
