@@ -1,4 +1,5 @@
 use crate::{
+    context_engine::ContextEngine,
     metrics::Metrics,
     orderbook::OrderBook,
     tape::Tape,
@@ -57,6 +58,7 @@ pub async fn run(
     let mut book = OrderBook::default();
     let mut tape = Tape::new(window_ms);
     let mut normalizer = FeatureNormalizer::default();
+    let mut context_engine = ContextEngine::default();
 
     while let Some(update) = rx.recv().await {
         let started = Instant::now();
@@ -76,6 +78,7 @@ pub async fn run(
 
         let features = normalizer.features(&book_state, &tape_state, timestamp);
         let regime = normalizer.regime(&features, &book_state);
+        let context = context_engine.update(&features, &book_state, &tape_state);
         let stale = data_age_ms(timestamp) > max_data_age_ms;
         let output = MicrostructureFrame {
             timestamp,
@@ -84,6 +87,7 @@ pub async fn run(
             tape: tape_state,
             features,
             regime,
+            context,
             stale,
         };
 
