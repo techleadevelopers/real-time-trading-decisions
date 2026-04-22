@@ -4,7 +4,7 @@ use crate::{
     entry_quality, ev_calculator,
     metrics::Metrics,
     scenario_simulator,
-    types::{FinalDecision, MetaDecision, OrderIntent},
+    types::{FinalDecision, MetaDecision, OrderIntent, RegimeKind},
 };
 use std::{collections::VecDeque, sync::Arc, time::Duration};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -89,7 +89,13 @@ fn evaluate(cfg: &Config, state: &MetaState, intent: &OrderIntent) -> MetaDecisi
     let thresholds = thresholds(cfg, state, intent);
     let recent_success = recent_success_rate(state);
 
-    let (decision, reason) = if intent.regime.spread > 18.0 {
+    let (decision, reason) = if intent.context.regime == RegimeKind::NewsShock {
+        (FinalDecision::Skip, "news_shock_block")
+    } else if intent.context.regime == RegimeKind::LowLiquidity && !intent.request.reduce_only {
+        (FinalDecision::Skip, "low_liquidity_no_new_risk")
+    } else if intent.context.stability_score < 0.30 {
+        (FinalDecision::Skip, "unstable_context")
+    } else if intent.regime.spread > 18.0 {
         (FinalDecision::Skip, "spread_too_wide")
     } else if intent.regime.volatility > 4.2 && intent.regime.trend_strength < 0.8 {
         (FinalDecision::Skip, "toxic_volatility")
@@ -137,15 +143,21 @@ fn thresholds(cfg: &Config, state: &MetaState, intent: &OrderIntent) -> Threshol
     } else {
         0.0
     };
-    let regime_penalty = if intent.regime.spread > 10.0 || intent.regime.volatility > 3.0 {
-        0.08
+    let regime_penalty = match intent.context.regime {
+        RegimeKind::NewsShock => 0.30,
+        RegimeKind::LowLiquidity => 0.18,
+        RegimeKind::HighVolatility => 0.12,
+        RegimeKind::TrendExpansion => -0.04,
+        RegimeKind::Normal => 0.0,
+    } + if intent.regime.spread > 10.0 || intent.regime.volatility > 3.0 {
+        0.05
     } else {
         0.0
     };
     Thresholds {
         ev: (cfg.base_order_usd * 0.00015) + dd_pressure,
-        entry_quality: (0.58 + regime_penalty + dd_pressure * 0.5).clamp(0.50, 0.82),
-        competition: (0.78 - regime_penalty).clamp(0.55, 0.82),
+        entry_quality: (0.58 + regime_penalty + dd_pressure * 0.5).clamp(0.50, 0.88),
+        competition: (0.78 - regime_penalty * 0.7).clamp(0.45, 0.84),
         opportunity_rank: (0.52 + regime_penalty).clamp(0.45, 0.75),
     }
 }
