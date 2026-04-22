@@ -2,7 +2,7 @@ use crate::{
     config::Config,
     metrics::Metrics,
     types::{
-        Decision, Direction, FillEvent, OrderIntent, OrderRequest, OrderType, Position,
+        Decision, Direction, FillEvent, OrderIntent, OrderRequest, OrderType, Position, RegimeKind,
         ScoredDecision, Side,
     },
 };
@@ -91,7 +91,7 @@ fn decide_order(
     match signal.decision {
         Decision::EnterSmall if !position.is_open() => {
             let size = quote_to_base(
-                cfg.base_order_usd * signal.confidence.max(0.35),
+                cfg.base_order_usd * signal.confidence.max(0.35) * context_size_factor(signal),
                 signal.market.price,
             );
             Some(intent(cfg, side, size, false, signal, position))
@@ -99,7 +99,13 @@ fn decide_order(
         Decision::EnterSmall | Decision::ScaleIn
             if can_scale(position, signal, last_score, side, cfg.max_entries) =>
         {
-            let entry_multiplier = 1.0 + position.entries as f64 * 0.30 + signal.confidence * 0.25;
+            let regime_boost = if signal.context.regime == RegimeKind::TrendExpansion {
+                0.35
+            } else {
+                0.0
+            };
+            let entry_multiplier =
+                1.0 + position.entries as f64 * 0.30 + signal.confidence * 0.25 + regime_boost;
             let size = quote_to_base(cfg.base_order_usd * entry_multiplier, signal.market.price);
             Some(intent(cfg, side, size, false, signal, position))
         }
@@ -136,6 +142,8 @@ fn can_scale(
             == if desired_side == Side::Buy { 1.0 } else { -1.0 }
         && position.unrealized_pnl >= -0.0001
         && signal.adversarial_risk < 0.55
+        && signal.context.regime != RegimeKind::NewsShock
+        && signal.context.liquidity_score > 0.35
 }
 
 fn intent(
@@ -172,7 +180,18 @@ fn intent(
         expected_duration_ms: signal.expected_duration_ms,
         data_latency_ms: signal.data_latency_ms,
         regime: signal.regime.clone(),
+        context: signal.context.clone(),
         meta: None,
+    }
+}
+
+fn context_size_factor(signal: &ScoredDecision) -> f64 {
+    match signal.context.regime {
+        RegimeKind::LowLiquidity => 0.45,
+        RegimeKind::HighVolatility => 0.70,
+        RegimeKind::TrendExpansion => 1.20,
+        RegimeKind::NewsShock => 0.0,
+        RegimeKind::Normal => 1.0,
     }
 }
 
