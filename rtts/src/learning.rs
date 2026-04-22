@@ -28,6 +28,9 @@ pub struct LearningState {
     weights: AdaptiveWeights,
     hit_rate: f64,
     slippage_error_bps: f64,
+    entry_quality_ema: f64,
+    duration_ema_ms: f64,
+    scaling_aggressiveness: f64,
     threshold: f64,
     consecutive_losses: u32,
     samples: u64,
@@ -39,6 +42,9 @@ impl Default for LearningState {
             weights: AdaptiveWeights::default(),
             hit_rate: 0.50,
             slippage_error_bps: 0.0,
+            entry_quality_ema: 0.55,
+            duration_ema_ms: 250.0,
+            scaling_aggressiveness: 1.0,
             threshold: 0.70,
             consecutive_losses: 0,
             samples: 0,
@@ -91,12 +97,20 @@ impl LearningState {
         self.hit_rate = (1.0 - alpha) * self.hit_rate + alpha * f64::from(won);
         self.slippage_error_bps = (1.0 - alpha) * self.slippage_error_bps
             + alpha * (sample.actual_slippage_bps - sample.expected_slippage_bps);
+        self.entry_quality_ema =
+            (1.0 - alpha) * self.entry_quality_ema + alpha * sample.entry_quality;
+        self.duration_ema_ms =
+            (1.0 - alpha) * self.duration_ema_ms + alpha * sample.duration_ms as f64;
         if won {
             self.consecutive_losses = 0;
             self.threshold = (self.threshold - 0.003).max(0.66);
+            if sample.entry_quality > 0.70 && sample.duration_ms < 750 {
+                self.scaling_aggressiveness = adjust(self.scaling_aggressiveness, 0.01);
+            }
         } else {
             self.consecutive_losses = self.consecutive_losses.saturating_add(1);
             self.threshold = (self.threshold + 0.012).min(0.86);
+            self.scaling_aggressiveness = adjust(self.scaling_aggressiveness, -0.025);
         }
 
         let size = 0.015 * reward * sample.confidence.clamp(0.1, 1.0);
@@ -106,6 +120,7 @@ impl LearningState {
         if sample.actual_slippage_bps > sample.expected_slippage_bps + 2.0 {
             self.weights.spread = adjust(self.weights.spread, 0.02);
             self.weights.liquidity = adjust(self.weights.liquidity, 0.015);
+            self.scaling_aggressiveness = adjust(self.scaling_aggressiveness, -0.015);
         }
         if sample.regime.volatility > 3.0 && !won {
             self.weights.adversarial = adjust(self.weights.adversarial, 0.025);
