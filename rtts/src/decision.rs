@@ -104,4 +104,3 @@ fn decision_label(decision: Decision) -> &'static str {
         Decision::Exit => "exit",
     }
 }
-
