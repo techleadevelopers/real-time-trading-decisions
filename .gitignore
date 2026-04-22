@@ -25,6 +25,7 @@ ENV/
 data/models/
 data/raw/
 data/processed/
+rtts/target/
 *.pkl
 *.joblib
 *.npy
