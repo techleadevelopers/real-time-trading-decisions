@@ -12,4 +12,3 @@ async fn main() -> Result<()> {
     let metrics = Metrics::new()?;
     pipeline::run(cfg, metrics).await
 }
-
