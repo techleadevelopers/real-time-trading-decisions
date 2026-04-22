@@ -45,7 +45,10 @@ pub async fn run(
                 if reason == "daily_drawdown" {
                     kill_switch = true;
                 }
-                metrics.rejected_orders_total.with_label_values(&[reason]).inc();
+                metrics
+                    .rejected_orders_total
+                    .with_label_values(&[reason])
+                    .inc();
                 warn!(reason, "order rejected by risk");
             }
         }
@@ -92,4 +95,3 @@ fn validate<'a>(
 fn abnormal(intent: &OrderIntent) -> bool {
     !intent.score.is_finite() || intent.score > 1.0 || intent.score < 0.0
 }
-
