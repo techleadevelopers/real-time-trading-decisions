@@ -74,4 +74,3 @@ fn classify(window: &VecDeque<MarketEvent>) -> Event {
         Event::Neutral
     }
 }
-
