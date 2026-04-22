@@ -262,6 +262,18 @@ impl Default for MarketContext {
     }
 }
 
+impl Default for SymbolProfile {
+    fn default() -> Self {
+        Self {
+            symbol: String::new(),
+            avg_spread_bps: 4.0,
+            avg_fill_probability: 0.50,
+            volatility_ema: 1.0,
+            avg_trade_size: 1.0,
+        }
+    }
+}
+
 impl Position {
     #[inline]
     pub fn is_open(&self) -> bool {
@@ -344,6 +356,62 @@ pub enum OrderType {
     Limit,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ExecutionMode {
+    Aggressive,
+    #[default]
+    Passive,
+    Defensive,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FillProbabilityClass {
+    HighFill,
+    #[default]
+    LowFill,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct QueueEstimate {
+    pub queue_position: f64,
+    pub volume_ahead: f64,
+    pub fill_probability: f64,
+    pub placement_depth_bps: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MicroExitReason {
+    #[default]
+    None,
+    TakeProfit,
+    MomentumFade,
+    AdverseFlow,
+    LiquidityCollapse,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MicroExitSignal {
+    pub reason: MicroExitReason,
+    pub reduce_ratio: f64,
+    pub urgency: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MarkoutSnapshot {
+    pub pnl_100ms: f64,
+    pub pnl_500ms: f64,
+    pub pnl_1s: f64,
+}
+
+#[derive(Clone, Debug)]
+pub struct SymbolProfile {
+    pub symbol: String,
+    pub avg_spread_bps: f64,
+    pub avg_fill_probability: f64,
+    pub volatility_ema: f64,
+    pub avg_trade_size: f64,
+}
+
 #[derive(Clone, Debug)]
 pub struct OrderRequest {
     pub symbol: String,
@@ -372,6 +440,9 @@ pub struct OrderIntent {
     pub context: MarketContext,
     pub flow: FlowState,
     pub timing: MicroTimingState,
+    pub execution_mode: ExecutionMode,
+    pub queue_estimate: QueueEstimate,
+    pub fill_probability: FillProbabilityClass,
     pub meta: Option<MetaDecision>,
 }
 
@@ -389,6 +460,10 @@ pub struct FillEvent {
     pub latency_us: u64,
     pub expected_slippage_bps: f64,
     pub actual_slippage_bps: f64,
+    pub queue_estimate: QueueEstimate,
+    pub execution_mode: ExecutionMode,
+    pub micro_exit: MicroExitSignal,
+    pub markout: MarkoutSnapshot,
     pub complete: bool,
 }
 
@@ -403,5 +478,8 @@ pub struct LearningSample {
     pub pnl: f64,
     pub duration_ms: u64,
     pub entry_quality: f64,
+    pub markout_100ms: f64,
+    pub markout_500ms: f64,
+    pub markout_1s: f64,
     pub regime: MarketRegime,
 }
