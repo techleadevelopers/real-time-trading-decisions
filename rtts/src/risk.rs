@@ -88,6 +88,15 @@ fn validate<'a>(
     if -realized_pnl > cfg.capital * cfg.max_daily_drawdown_pct {
         return Err("daily_drawdown");
     }
+    if intent.data_latency_ms > cfg.max_data_age_ms {
+        return Err("stale_data");
+    }
+    if intent.expected_duration_ms == 0 {
+        return Err("bad_duration");
+    }
+    if intent.expected_slippage_bps > intent.request.max_slippage_bps {
+        return Err("slippage_budget");
+    }
     Ok(())
 }
 
