@@ -1,6 +1,7 @@
 pub mod adaptive_engine;
 pub mod competition_model;
 pub mod config;
+pub mod context_engine;
 pub mod decision;
 pub mod entry_quality;
 pub mod ev_calculator;
