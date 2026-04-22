@@ -26,6 +26,13 @@ rtts/
     learning.rs         # exponential online threshold/weight updates
     position.rs         # one evolving position with scale/decay logic
     risk.rs             # hard risk, stale-data, DD, kill-switch checks
+    queue_position.rs   # queue position, volume-ahead, fill probability estimate
+    fill_probability.rs # high/low fill classification from queue and flow
+    execution_mode.rs   # aggressive/passive/defensive mode switching
+    adverse_selection.rs # pre/post-fill adverse selection scoring
+    micro_exit.rs       # take-profit, fade, adverse-flow, liquidity-collapse exits
+    markout.rs          # 100ms/500ms/1s post-entry markout estimates
+    symbol_profile.rs   # per-symbol spread/fill/volatility profile
     execution_smart.rs  # market/limit choice, partial fill, replace
     metrics.rs          # Prometheus text endpoint
     pipeline.rs         # bounded mpsc wiring
@@ -83,9 +90,12 @@ $env:RTTS_MAX_CONSECUTIVE_LOSSES="3"
 9. `position` treats entries and scale-ins as one evolving position. It opens micro size first, scales only on confirmed flow/timing/liquidity, reduces size in low liquidity, and allows more scale in trend expansion.
 10. `risk` rejects stale, over-budget, over-risk, and abnormal orders before meta evaluation.
 11. `meta_engine` is the final judge. It blocks news-shock context, tightens thresholds in unstable regimes, simulates continuation/reversal/chop, computes slippage/latency-adjusted EV, scores entry quality, estimates competition, waits for confirmation when needed, then returns execute, wait, or skip.
-12. `execution_smart` chooses market vs limit only after the meta decision approves the order, then simulates queue/partial fills, cancels/replaces, records slippage, rejects adverse selection, and feeds learning samples back.
-13. `learning` adjusts thresholds, feature weights, and scaling aggressiveness with exponential updates from slippage, entry quality, PnL, and duration.
-14. `metrics` exposes stage/execution latency, adjusted EV, entry quality, competition score, skipped/executed decisions, slippage, microtrade PnL, hit rate by regime, scale efficiency, position size, drawdown, and backpressure.
+12. `queue_position`, `fill_probability`, and `execution_mode` estimate queue position, volume ahead, fill probability, and switch between aggressive, passive, and defensive execution.
+13. `execution_smart` chooses market vs limit only after the meta decision approves the order, then simulates queue/partial fills, cancels/replaces, records slippage, rejects adverse selection, triggers immediate defensive exits, and feeds learning samples back.
+14. `micro_exit` and `markout` evaluate take-profit, momentum fade, adverse flow, liquidity collapse, and 100ms/500ms/1s post-entry quality.
+15. `symbol_profile` keeps per-symbol spread, fill probability, volatility, and trade-size estimates to adapt execution.
+16. `learning` adjusts thresholds, feature weights, and scaling aggressiveness with exponential updates from slippage, entry quality, PnL, duration, and markouts.
+17. `metrics` exposes stage/execution latency, adjusted EV, entry quality, competition score, skipped/executed decisions, slippage, microtrade PnL, hit rate by regime, scale efficiency, position size, drawdown, and backpressure.
 
 ## Safety Notes
 
