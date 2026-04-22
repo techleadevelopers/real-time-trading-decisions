@@ -2,7 +2,8 @@ use crate::{
     metrics::Metrics,
     model::LogisticFilter,
     types::{
-        Decision, Direction, Event, FeatureFrame, MarketContext, MarketRegime, ScoredDecision,
+        Decision, Direction, Event, FeatureFrame, FlowState, MarketContext, MarketRegime,
+        MicroTimingState, ScoredDecision,
     },
 };
 use std::{sync::Arc, time::Instant};
@@ -59,6 +60,8 @@ pub async fn run(
             features: frame.features,
             regime: MarketRegime::default(),
             context: MarketContext::default(),
+            flow: FlowState::default(),
+            timing: MicroTimingState::default(),
             direction: match frame.event {
                 Event::PumpDetected => Direction::Long,
                 Event::DumpDetected => Direction::Short,
