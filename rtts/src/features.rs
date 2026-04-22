@@ -95,5 +95,14 @@ fn compute(window: &VecDeque<MarketEvent>) -> Features {
         imbalance: last.bid_ask_imbalance.clamp(-1.0, 1.0),
         volatility: volatility.clamp(0.0, 5.0),
         spread: (last.spread + spread_change.abs()).clamp(0.0, 5.0),
+        weighted_imbalance: last.bid_ask_imbalance.clamp(-1.0, 1.0),
+        spread_dynamics: spread_change.clamp(-5.0, 5.0),
+        micro_price_velocity: velocity,
+        trade_clustering: 0.0,
+        liquidity_shift: 0.0,
+        order_flow_delta: 0.0,
+        absorption: 0.0,
+        spoofing_risk: 0.0,
+        liquidity_pull: 0.0,
     }
 }
