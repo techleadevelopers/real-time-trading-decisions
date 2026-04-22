@@ -1,6 +1,6 @@
 use crate::{
-    config::Config,
-    decision, event_engine, execution, features, ingestion, metrics::Metrics, position, risk,
+    config::Config, decision, event_engine, execution, features, ingestion, metrics::Metrics,
+    position, risk,
 };
 use anyhow::{Context, Result};
 use std::{net::SocketAddr, sync::Arc};
@@ -48,4 +48,3 @@ pub async fn run(cfg: Config, metrics: Arc<Metrics>) -> Result<()> {
     info!(addr = %metrics_addr, "metrics endpoint listening at /metrics");
     ingestion::run(cfg, market_tx, metrics).await
 }
-
