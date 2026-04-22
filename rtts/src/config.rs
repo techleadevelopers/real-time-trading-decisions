@@ -26,6 +26,14 @@ pub struct Config {
     pub max_entries: u32,
     #[arg(long, env = "RTTS_STOP_LOSS_BPS", default_value_t = 25.0)]
     pub stop_loss_bps: f64,
+    #[arg(long, env = "RTTS_MAX_DATA_AGE_MS", default_value_t = 250)]
+    pub max_data_age_ms: u64,
+    #[arg(long, env = "RTTS_MAX_DECISION_LATENCY_US", default_value_t = 1_500)]
+    pub max_decision_latency_us: u64,
+    #[arg(long, env = "RTTS_MAX_EXECUTION_LATENCY_US", default_value_t = 8_000)]
+    pub max_execution_latency_us: u64,
+    #[arg(long, env = "RTTS_MAX_CONSECUTIVE_LOSSES", default_value_t = 3)]
+    pub max_consecutive_losses: u32,
     #[arg(long, env = "RTTS_CHANNEL_CAP", default_value_t = 4096)]
     pub channel_capacity: usize,
     #[arg(long, env = "RTTS_WINDOW_MS", default_value_t = 500)]
