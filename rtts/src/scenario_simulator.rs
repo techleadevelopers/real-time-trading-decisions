@@ -1,10 +1,20 @@
-use crate::types::{Decision, OrderIntent, Scenario, ScenarioType};
+use crate::types::{Decision, OrderIntent, RegimeKind, Scenario, ScenarioType};
 
 pub fn simulate(intent: &OrderIntent) -> Vec<Scenario> {
     let notional = intent.request.size * intent.last_price;
     let edge_bps = (intent.score - 0.5).max(0.0) * 18.0;
     let duration_penalty = (intent.expected_duration_ms as f64 / 1_000.0).min(1.5);
-    let regime_noise = intent.regime.volatility * 0.08 + intent.regime.spread * 0.015;
+    let context_noise = match intent.context.regime {
+        RegimeKind::NewsShock => 0.45,
+        RegimeKind::LowLiquidity => 0.24,
+        RegimeKind::HighVolatility => 0.15,
+        RegimeKind::TrendExpansion => -0.08,
+        RegimeKind::Normal => 0.0,
+    };
+    let regime_noise = intent.regime.volatility * 0.08
+        + intent.regime.spread * 0.015
+        + context_noise
+        + (1.0 - intent.context.stability_score) * 0.12;
 
     let continuation_prob = (0.34 + intent.score * 0.38 + intent.urgency * 0.10
         - regime_noise
