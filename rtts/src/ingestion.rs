@@ -1,7 +1,7 @@
 use crate::{
     config::{Config, Exchange},
     metrics::Metrics,
-    types::{MarketEvent, Side},
+    types::{BookDelta, BookLevel, MarketUpdate, Side, TradeEvent},
 };
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
@@ -15,14 +15,14 @@ use tokio::sync::mpsc::Sender;
 use tokio_tungstenite::connect_async;
 use tracing::{info, warn};
 
-pub async fn run(cfg: Config, tx: Sender<MarketEvent>, metrics: Arc<Metrics>) -> Result<()> {
+pub async fn run(cfg: Config, tx: Sender<MarketUpdate>, metrics: Arc<Metrics>) -> Result<()> {
     match cfg.exchange {
         Exchange::Mock => mock_feed(tx, metrics).await,
         Exchange::Binance => binance_feed(cfg, tx, metrics).await,
     }
 }
 
-async fn mock_feed(tx: Sender<MarketEvent>, metrics: Arc<Metrics>) -> Result<()> {
+async fn mock_feed(tx: Sender<MarketUpdate>, metrics: Arc<Metrics>) -> Result<()> {
     let mut rng = StdRng::seed_from_u64(42);
     let mut price: f64 = 67_000.0;
     let mut interval = tokio::time::interval(Duration::from_millis(10));
@@ -41,19 +41,45 @@ async fn mock_feed(tx: Sender<MarketEvent>, metrics: Arc<Metrics>) -> Result<()>
         } else {
             Side::Sell
         };
-        let event = MarketEvent {
+        let trade = TradeEvent {
             timestamp: now_ms(),
             price,
             volume: rng.gen_range(0.02..1.6),
             side,
-            bid_ask_imbalance: rng.gen_range(-0.85..0.85),
-            spread: rng.gen_range(0.00001..0.00045),
         };
-        send_market_event(&tx, event, &metrics, "ingestion").await?;
+        let wall_side = rng.gen_bool(0.5);
+        let wall_size = if rng.gen_bool(0.08) { 8.0 } else { 1.0 };
+        let delta = BookDelta {
+            timestamp: trade.timestamp,
+            bids: (1..=10)
+                .map(|level| BookLevel {
+                    price: price - level as f64 * 0.5,
+                    quantity: rng.gen_range(0.2..2.2)
+                        * if wall_side && level == 3 {
+                            wall_size
+                        } else {
+                            1.0
+                        },
+                })
+                .collect(),
+            asks: (1..=10)
+                .map(|level| BookLevel {
+                    price: price + level as f64 * 0.5,
+                    quantity: rng.gen_range(0.2..2.2)
+                        * if !wall_side && level == 3 {
+                            wall_size
+                        } else {
+                            1.0
+                        },
+                })
+                .collect(),
+        };
+        send_market_event(&tx, MarketUpdate::BookDelta(delta), &metrics, "ingestion").await?;
+        send_market_event(&tx, MarketUpdate::Trade(trade), &metrics, "ingestion").await?;
     }
 }
 
-async fn binance_feed(cfg: Config, tx: Sender<MarketEvent>, metrics: Arc<Metrics>) -> Result<()> {
+async fn binance_feed(cfg: Config, tx: Sender<MarketUpdate>, metrics: Arc<Metrics>) -> Result<()> {
     let symbol = cfg.symbol.to_lowercase();
     let url = format!(
         "wss://stream.binance.com:9443/stream?streams={}@aggTrade/{}@depth5@100ms",
@@ -91,30 +117,19 @@ async fn binance_feed(cfg: Config, tx: Sender<MarketEvent>, metrics: Arc<Metrics
 
             match envelope.data {
                 BinancePayload::AggTrade(trade) => {
-                    let spread = if best_bid > 0.0 && best_ask > 0.0 {
-                        (best_ask - best_bid) / trade.price.max(f64::EPSILON)
-                    } else {
-                        0.0
-                    };
-                    let imbalance = if bid_qty + ask_qty > f64::EPSILON {
-                        (bid_qty - ask_qty) / (bid_qty + ask_qty)
-                    } else {
-                        0.0
-                    };
                     let side = if trade.buyer_is_maker {
                         Side::Sell
                     } else {
                         Side::Buy
                     };
-                    let event = MarketEvent {
+                    let event = TradeEvent {
                         timestamp: trade.event_time,
                         price: trade.price,
                         volume: trade.quantity,
                         side,
-                        bid_ask_imbalance: imbalance,
-                        spread,
                     };
-                    send_market_event(&tx, event, &metrics, "ingestion").await?;
+                    send_market_event(&tx, MarketUpdate::Trade(event), &metrics, "ingestion")
+                        .await?;
                 }
                 BinancePayload::Depth(depth) => {
                     if let Some((price, qty)) = depth.bids.first() {
@@ -125,6 +140,22 @@ async fn binance_feed(cfg: Config, tx: Sender<MarketEvent>, metrics: Arc<Metrics
                         best_ask = *price;
                         ask_qty = *qty;
                     }
+                    let delta = BookDelta {
+                        timestamp: depth.event_time.unwrap_or_else(now_ms),
+                        bids: depth
+                            .bids
+                            .into_iter()
+                            .map(|(price, quantity)| BookLevel { price, quantity })
+                            .collect(),
+                        asks: depth
+                            .asks
+                            .into_iter()
+                            .map(|(price, quantity)| BookLevel { price, quantity })
+                            .collect(),
+                    };
+                    let _ = (best_bid, best_ask, bid_qty, ask_qty);
+                    send_market_event(&tx, MarketUpdate::BookDelta(delta), &metrics, "ingestion")
+                        .await?;
                 }
             }
         }
@@ -133,8 +164,8 @@ async fn binance_feed(cfg: Config, tx: Sender<MarketEvent>, metrics: Arc<Metrics
 }
 
 async fn send_market_event(
-    tx: &Sender<MarketEvent>,
-    event: MarketEvent,
+    tx: &Sender<MarketUpdate>,
+    event: MarketUpdate,
     metrics: &Metrics,
     stage: &'static str,
 ) -> Result<()> {
@@ -177,6 +208,8 @@ struct AggTrade {
 
 #[derive(Debug, Deserialize)]
 struct Depth {
+    #[serde(rename = "E")]
+    event_time: Option<u64>,
     #[serde(rename = "b", deserialize_with = "de_book")]
     bids: Vec<(f64, f64)>,
     #[serde(rename = "a", deserialize_with = "de_book")]
