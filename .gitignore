@@ -12,9 +12,10 @@ __pycache__/
 *.sqlite3
 *.db
 *.db-journal
-frontend 
-/frontend
-.frontend/
+
+# ---- Private frontend ----
+/frontend/
+
 # Virtual environment
 venv/
 env/
@@ -52,16 +53,6 @@ alembic/versions/
 alembic.ini
 instance/
 *.sqlite
-
-# ---- Frontend (Next.js / React / Vite) ----
-frontend/node_modules/
-frontend/.next/
-frontend/.vercel/
-frontend/dist/
-frontend/build/
-frontend/.cache/
-frontend/yarn.lock
-frontend/package-lock.json
 
 # ---- JS/TS cache ----
 *.tsbuildinfo
