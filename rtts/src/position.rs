@@ -2,8 +2,9 @@ use crate::{
     config::Config,
     metrics::Metrics,
     types::{
-        Decision, Direction, FillEvent, FlowSignal, OrderIntent, OrderRequest, OrderType, Position,
-        RegimeKind, ScoredDecision, Side, TimingSignal,
+        Decision, Direction, ExecutionMode, FillEvent, FillProbabilityClass, FlowSignal,
+        OrderIntent, OrderRequest, OrderType, Position, QueueEstimate, RegimeKind, ScoredDecision,
+        Side, TimingSignal,
     },
 };
 use std::{sync::Arc, time::Instant};
@@ -189,6 +190,9 @@ fn intent(
         context: signal.context.clone(),
         flow: signal.flow,
         timing: signal.timing,
+        execution_mode: ExecutionMode::Passive,
+        queue_estimate: QueueEstimate::default(),
+        fill_probability: FillProbabilityClass::LowFill,
         meta: None,
     }
 }
