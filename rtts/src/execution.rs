@@ -6,11 +6,7 @@ use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{info, warn};
 
-pub async fn run(
-    mut rx: Receiver<OrderIntent>,
-    fill_tx: Sender<FillEvent>,
-    metrics: Arc<Metrics>,
-) {
+pub async fn run(mut rx: Receiver<OrderIntent>, fill_tx: Sender<FillEvent>, metrics: Arc<Metrics>) {
     while let Some(intent) = rx.recv().await {
         let side_label = match intent.request.side {
             Side::Buy => "buy",
@@ -67,4 +63,3 @@ async fn paper_submit(intent: &OrderIntent) -> Result<FillEvent, ()> {
         timestamp: intent.timestamp,
     })
 }
-
