@@ -53,7 +53,8 @@ fn compute(window: &VecDeque<MarketEvent>) -> Features {
     };
     let last = window.back().expect("window has first");
     let elapsed_ms = last.timestamp.saturating_sub(first.timestamp).max(1) as f64;
-    let velocity = ((last.price - first.price) / first.price.max(f64::EPSILON) / elapsed_ms) * 1_000.0;
+    let velocity =
+        ((last.price - first.price) / first.price.max(f64::EPSILON) / elapsed_ms) * 1_000.0;
 
     let len = window.len() as f64;
     let mean_volume = window.iter().map(|event| event.volume).sum::<f64>() / len;
@@ -96,4 +97,3 @@ fn compute(window: &VecDeque<MarketEvent>) -> Features {
         spread: (last.spread + spread_change.abs()).clamp(0.0, 5.0),
     }
 }
-
