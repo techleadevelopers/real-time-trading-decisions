@@ -1,9 +1,14 @@
 use crate::{
     context_engine::ContextEngine,
+    flow_intelligence::FlowIntelligence,
     metrics::Metrics,
+    micro_timing::MicroTimingEngine,
     orderbook::OrderBook,
     tape::Tape,
-    types::{Features, MarketRegime, MarketUpdate, MicrostructureFrame, OrderBookState, TapeState},
+    types::{
+        Direction, Features, MarketRegime, MarketUpdate, MicrostructureFrame, OrderBookState,
+        TapeState,
+    },
 };
 use std::{sync::Arc, time::Instant};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -59,6 +64,8 @@ pub async fn run(
     let mut tape = Tape::new(window_ms);
     let mut normalizer = FeatureNormalizer::default();
     let mut context_engine = ContextEngine::default();
+    let mut flow_engine = FlowIntelligence::default();
+    let mut timing_engine = MicroTimingEngine::default();
 
     while let Some(update) = rx.recv().await {
         let started = Instant::now();
@@ -79,6 +86,9 @@ pub async fn run(
         let features = normalizer.features(&book_state, &tape_state, timestamp);
         let regime = normalizer.regime(&features, &book_state);
         let context = context_engine.update(&features, &book_state, &tape_state);
+        let direction_hint = direction_hint(&features, &book_state);
+        let flow = flow_engine.update(&features, &book_state, &tape_state, direction_hint);
+        let timing = timing_engine.update(&features, &book_state, &tape_state);
         let stale = data_age_ms(timestamp) > max_data_age_ms;
         let output = MicrostructureFrame {
             timestamp,
@@ -88,6 +98,8 @@ pub async fn run(
             features,
             regime,
             context,
+            flow,
+            timing,
             stale,
         };
 
@@ -109,6 +121,17 @@ pub async fn run(
                 break;
             }
         }
+    }
+}
+
+fn direction_hint(features: &Features, book: &OrderBookState) -> Direction {
+    let score = features.order_flow_delta + features.micro_price_velocity + book.weighted_imbalance;
+    if score > 0.20 {
+        Direction::Long
+    } else if score < -0.20 {
+        Direction::Short
+    } else {
+        Direction::Flat
     }
 }
 
