@@ -1,4 +1,4 @@
-use crate::types::{OrderIntent, Side};
+use crate::types::{OrderIntent, RegimeKind, Side};
 
 pub fn score(intent: &OrderIntent) -> f64 {
     let side_sign = match intent.request.side {
@@ -14,11 +14,20 @@ pub fn score(intent: &OrderIntent) -> f64 {
     let slippage_risk = (1.0
         - intent.expected_slippage_bps / intent.request.max_slippage_bps.max(1.0))
     .clamp(0.0, 1.0);
+    let context_modifier = match intent.context.regime {
+        RegimeKind::TrendExpansion => 0.08,
+        RegimeKind::Normal => 0.0,
+        RegimeKind::HighVolatility => -0.06,
+        RegimeKind::LowLiquidity => -0.16,
+        RegimeKind::NewsShock => -0.45,
+    } + (intent.context.liquidity_score - 0.5) * 0.12
+        + (intent.context.stability_score - 0.5) * 0.16;
 
     (0.25 * timing
         + 0.22 * liquidity_support
         + 0.23 * orderflow_alignment
         + 0.15 * latency_impact
-        + 0.15 * slippage_risk)
+        + 0.15 * slippage_risk
+        + context_modifier)
         .clamp(0.0, 1.0)
 }
