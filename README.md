@@ -124,6 +124,8 @@ rtts/
     ingestion.rs         # Binance websocket or deterministic mock feed
     orderbook.rs         # Delta L2 book, walls, spoof/pull/absorption
     tape.rs              # Aggressive flow, delta, bursts, exhaustion
+    flow_intelligence.rs # O(1) continuation/exhaustion/reversal flow state
+    micro_timing.rs      # Spread compression, liquidity pull, bursts, pullbacks
     context_engine.rs    # O(1) market context and regime classification
     microstructure.rs    # Normalized features and regime output
     adaptive_engine.rs   # Dynamic scoring and adversarial defense
@@ -146,15 +148,17 @@ rtts/
 1. `ingestion` emits raw `TradeEvent` and `BookDelta` updates.
 2. `orderbook` maintains L2 bid/ask depth by price tick and computes depth, top pressure, weighted imbalance, liquidity clusters, spoofing, liquidity pulls, and absorption.
 3. `tape` tracks aggressive buy/sell volume, delta, trade frequency, bursts, exhaustion, and continuation.
-4. `context_engine` classifies regimes: `Normal`, `HighVolatility`, `NewsShock`, `LowLiquidity`, and `TrendExpansion`.
-5. `microstructure` normalizes features online and emits numeric market regime values plus compact `MarketContext`.
-6. `adaptive_engine` produces direction, confidence, urgency, expected duration, and pre-trade slippage.
-7. `position` treats entries and scale-ins as one evolving position. It reduces size in low liquidity and allows more scale in trend expansion.
-8. `risk` rejects stale, over-budget, over-risk, and abnormal orders before meta evaluation.
-9. `meta_engine` is the final judge. It simulates continuation/reversal/chop, computes adjusted EV, scores entry quality, estimates competition, waits for confirmation when needed, and returns `Execute`, `Wait`, or `Skip`.
-10. `execution_smart` chooses market vs limit only after approval, then simulates partial fills, cancel/replace, slippage, and learning feedback.
-11. `learning` adjusts thresholds and feature weights using lightweight exponential updates.
-12. `metrics` exposes latency, EV, entry quality, competition score, skipped/executed decisions, slippage, microtrade PnL, hit rate by regime, scale efficiency, position size, drawdown, and backpressure.
+4. `flow_intelligence` classifies flow as strong continuation, weak continuation, exhaustion, or reversal risk.
+5. `micro_timing` scores spread compression, liquidity pull, trade bursts, and micro pullbacks to decide whether entry timing is optimal, neutral, waiting, or missed.
+6. `context_engine` classifies regimes: `Normal`, `HighVolatility`, `NewsShock`, `LowLiquidity`, and `TrendExpansion`.
+7. `microstructure` normalizes features online and emits numeric market regime values plus compact `MarketContext`, flow, and timing state.
+8. `adaptive_engine` produces direction, confidence, urgency, expected duration, and pre-trade slippage, while filtering missed timing and reversal-risk flow.
+9. `position` treats entries and scale-ins as one evolving position. It opens micro size first, scales only on confirmed flow/timing/liquidity, reduces size in low liquidity, and allows more scale in trend expansion.
+10. `risk` rejects stale, over-budget, over-risk, and abnormal orders before meta evaluation.
+11. `meta_engine` is the final judge. It simulates continuation/reversal/chop, computes adjusted EV, scores entry quality, estimates competition, waits for confirmation when needed, and returns `Execute`, `Wait`, or `Skip`.
+12. `execution_smart` chooses market vs limit only after approval, then simulates partial fills, cancel/replace, slippage, adverse-selection rejection, and learning feedback.
+13. `learning` adjusts thresholds, feature weights, and scaling aggressiveness using lightweight exponential updates from slippage, entry quality, PnL, and duration.
+14. `metrics` exposes latency, EV, entry quality, competition score, skipped/executed decisions, slippage, microtrade PnL, hit rate by regime, scale efficiency, position size, drawdown, and backpressure.
 
 ---
 
@@ -295,4 +299,3 @@ This system still loses to institutional HFT firms on:
 - venue-specific execution infrastructure
 
 The goal here is not to pretend to be colocated HFT. The goal is to enforce better decision quality, reduce false positives, control execution risk, and avoid trading when the edge is not statistically validated.
-
