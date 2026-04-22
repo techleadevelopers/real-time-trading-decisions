@@ -1,7 +1,13 @@
 use anyhow::Result;
-use prometheus::{Encoder, GaugeVec, HistogramOpts, HistogramVec, IntCounterVec, Registry, TextEncoder};
-use std::{convert::Infallible, net::SocketAddr, sync::Arc};
-use warp::Filter;
+use prometheus::{
+    Encoder, GaugeVec, HistogramOpts, HistogramVec, IntCounterVec, Registry, TextEncoder,
+};
+use std::{net::SocketAddr, sync::Arc};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+};
+use tracing::warn;
 
 #[derive(Clone)]
 pub struct Metrics {
@@ -41,12 +47,20 @@ impl Metrics {
             &["reason"],
         )?;
         let channel_backpressure_total = IntCounterVec::new(
-            prometheus::Opts::new("rtts_channel_backpressure_total", "Bounded channel full events"),
+            prometheus::Opts::new(
+                "rtts_channel_backpressure_total",
+                "Bounded channel full events",
+            ),
             &["stage"],
         )?;
         let stage_latency_us = HistogramVec::new(
-            HistogramOpts::new("rtts_stage_latency_us", "Stage processing latency in microseconds")
-                .buckets(vec![10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0]),
+            HistogramOpts::new(
+                "rtts_stage_latency_us",
+                "Stage processing latency in microseconds",
+            )
+            .buckets(vec![
+                10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0,
+            ]),
             &["stage"],
         )?;
         let position_size = GaugeVec::new(
@@ -83,31 +97,41 @@ impl Metrics {
     }
 
     pub async fn serve(self: Arc<Self>, addr: SocketAddr) {
-        let metrics = warp::path!("metrics")
-            .and(with_metrics(self))
-            .and_then(render_metrics);
-        warp::serve(metrics).run(addr).await;
+        let listener = match TcpListener::bind(addr).await {
+            Ok(listener) => listener,
+            Err(err) => {
+                warn!(%err, "metrics listener bind failed");
+                return;
+            }
+        };
+
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                continue;
+            };
+            let metrics = self.clone();
+            tokio::spawn(async move {
+                let mut request = [0_u8; 1024];
+                let _ = stream.read(&mut request).await;
+                let body = metrics.render();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/plain; version=0.0.4\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            });
+        }
+    }
+
+    fn render(&self) -> String {
+        let mut buffer = Vec::with_capacity(8192);
+        let encoder = TextEncoder::new();
+        let families = self.registry.gather();
+        match encoder.encode(&families, &mut buffer) {
+            Ok(()) => String::from_utf8(buffer).unwrap_or_else(|_| String::new()),
+            Err(err) => format!("# metrics encode error: {err}\n"),
+        }
     }
 }
-
-fn with_metrics(
-    metrics: Arc<Metrics>,
-) -> impl Filter<Extract = (Arc<Metrics>,), Error = Infallible> + Clone {
-    warp::any().map(move || metrics.clone())
-}
-
-async fn render_metrics(metrics: Arc<Metrics>) -> Result<impl warp::Reply, Infallible> {
-    let mut buffer = Vec::with_capacity(8192);
-    let encoder = TextEncoder::new();
-    let families = metrics.registry.gather();
-    let body = match encoder.encode(&families, &mut buffer) {
-        Ok(()) => String::from_utf8(buffer).unwrap_or_else(|_| String::new()),
-        Err(err) => format!("# metrics encode error: {err}\n"),
-    };
-    Ok(warp::reply::with_header(
-        body,
-        "content-type",
-        encoder.format_type(),
-    ))
-}
-
