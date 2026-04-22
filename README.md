@@ -1,235 +1,298 @@
-# Neural Edge Trading – Short Sniper
+# Neural Edge Trading
 
-> 
->
-> "cripto é perigoso, mas vantajoso — grandes escalas, lucros nucleares"
+Neural Edge Trading is a hybrid crypto trading research and execution project.
 
-Projeto pronto para operar sua visão: arquitetado simples e robusto, com FastAPI no backend, HTML puro no frontend e estratégia “Short Sniper” fundindo regras de euforia + modelo estatístico. Suba com um `docker-compose up --build` e comece a treinar e sinalizar.
+It currently has two distinct layers:
 
----
+- `backend/`: Python/FastAPI research API for candle-based data collection, baseline features, model training, signal inspection, and backtest endpoints.
+- `rtts/`: Rust + Tokio real-time trading system focused on event-driven, microstructure-aware scalp execution.
 
-## Visão Geral
-- Foco: capturar assimetrias na euforia (“short inteligente no topo”).
-- Estratégia: regra determinística de euforia + probabilidade estatística de queda (Logistic Regression).
-- Infra: `docker-compose` com Backend FastAPI, Frontend Nginx (HTML puro), Postgres (futuro), Redis (futuro).
-- Fluxo:
-  1) Coleta candles (BingX; fallback Binance).
-  2) Calcula indicadores e regra Short Sniper.
-  3) Treina modelo baseline e gera probabilidade de queda.
-  4) Fusão conservadora → `SHORT_STRONG | SHORT_WEAK | NEUTRAL`.
+The Rust RTTS is the execution-oriented core. It is not candle-based. It consumes trade prints and L2 order book updates, builds microstructure state, evaluates multiple scenarios, and only sends paper orders after risk and meta-decision validation.
+
+The `frontend/` directory is intentionally private/local and ignored by Git. It is not part of the public repository.
 
 ---
 
-## Arquitetura
-- Serviços (compose):
-  - `backend` (FastAPI + Uvicorn): API de dados, treino e predição.
-  - `frontend` (Nginx): HTML estático com Lightweight-Charts via CDN.
-  - `db` (Postgres 15): Persistência (reservado p/ evolução).
-  - `redis` (Redis 7): Cache/filas (reservado p/ evolução).
-- Pastas principais:
-  - `backend/app.py` – montagem da API e rotas.
-  - `backend/routers/*` – endpoints `health`, `data`, `model`, `backtest`.
-  - `backend/services/*` – `collector`, `features`, `models`, `rules`, `utils`.
-  - `backend/data/{raw,processed,models}` – insumos e artefatos de modelo.
-  - `frontend/*` – `index.html`, `signals.html`, `settings.html`, CSS/JS.
+## Current Architecture
 
----
-
-## Estratégia: Short Sniper (assinatura de euforia)
-Regras por candle (acende `short_signal = 1` quando TODAS se cumprem):
-- RSI(14) ≥ 72
-- Pico de volume (z-score) ≥ 1.5
-- Sombra superior relevante (upper wick) ≥ 0.35
-- Estiramento de +12% em 15 barras (`ret_15 ≥ 0.12`)
-
-Racional:
-- Não adivinha topo — espera estiramento + exaustão (pavio) em contexto de euforia (RSI alto + volume).
-- Conservador: confirma fraqueza, reduz falso positivo de rompimentos saudáveis.
-
-A fusão com o modelo estatístico aplica pesos conservadores:
-- `SHORT_STRONG`: regra = 1 E `prob_down ≥ 0.55`
-- `SHORT_WEAK`: regra = 1 OU `prob_down ≥ 0.60`
-- `NEUTRAL`: caso contrário
-
-Ajustes finos (opcional):
-- Subir limiar RSI para mercados muito tendenciais (ex.: 75–80).
-- Aumentar `vol_z` para filtrar altcoins com “barulho”.
-- Multi‑timeframe: pedir confirmação de fraqueza no timeframe acima (e.g., 5m confirma 1m).
-
----
-
-## Modelagem Estatística
-- Features: `rsi14`, `ret_1`, `ret_5`, `ret_15`, `vol_z`, `upper_wick`.
-- Target: `y_down = (fwd_ret_5 < 0)` com `fwd_ret_5 = pct_change(5).shift(-5)`.
-- Modelo: `LogisticRegression(max_iter=200)`.
-- Persistência do artefato: `backend/data/models/baseline_logreg.pkl` (via `joblib`).
-- Comportamento seguro: se não houver modelo treinado, `POST /model/predict` retorna aviso e segue reportando a regra.
-
----
-
-## Coleta de Dados
-- Exchange padrão: `BINGX` (swap v3). Fallback automático para `BINANCE` ao falhar.
-- Endpoints utilizados:
-  - BingX: `openApi/swap/v3/quote/klines`
-  - Binance: `/api/v3/klines`
-- Colunas padronizadas: `open_time, open, high, low, close, volume`.
-
----
-
-## Endpoints Principais
-- `GET /health/` → `{ ok: true }`
-- `GET /data/candles?symbol=NEARUSDT&interval=1m&limit=300`
-- `GET /data/signals?symbol=NEARUSDT&interval=1m&limit=300` → últimas 10 com indicadores e `short_signal`.
-- `POST /model/train?symbol=NEARUSDT&interval=1m&limit=500` → treina baseline, salva em `data/models`. (requer `Authorization: Bearer <AUTH_TOKEN>` se configurado)
-- `POST /model/predict?symbol=NEARUSDT&interval=1m&limit=500` → calcula regra + prob e retorna a decisão fundida. (requer `Authorization` se token ativo)
-
-Exemplos (curl):
-```bash
-curl http://localhost:8000/health/
-curl "http://localhost:8000/data/candles?symbol=NEARUSDT&interval=1m&limit=100"
-curl -X POST "http://localhost:8000/model/train?symbol=NEARUSDT&interval=1m&limit=500"
-curl -X POST "http://localhost:8000/model/predict?symbol=NEARUSDT&interval=1m&limit=500"
+```text
+neural-edge-trading/
+  backend/              # FastAPI research and model API
+  rtts/                 # Rust real-time trading system
+  docker-compose.yml    # Backend/db/redis local stack
+  .env.example          # Environment template
+  README.md             # This file
 ```
 
+Ignored local-only paths:
+
+```text
+frontend/
+rtts/target/
+```
+
+These are intentionally not pushed to GitHub.
+
 ---
 
-## Frontend (HTML puro)
-- `frontend/index.html`: gráfico de candles (Lightweight‑Charts via CDN) + botões “Treinar” e “Predizer”.
-- `frontend/signals.html`: lista as últimas 10 observações com indicadores.
-- `frontend/settings.html`: instruções rápidas e variáveis principais.
-- Chama API local (`http://localhost:8000`) quando acessado em `localhost:3000`.
+## Backend: Python Research API
 
----
+The Python backend remains useful for slower research workflows:
 
-## Quickstart
-1) Variáveis de ambiente
-```bash
-# Linux/macOS
-cp .env.example .env
-# Windows (PowerShell)
+- candle collection from BingX/Binance
+- baseline feature calculation
+- deterministic Short Sniper rules
+- logistic regression baseline model
+- model train/predict endpoints
+- backtest endpoint stubs
+- health/data/model/regime routers
+
+Main files:
+
+```text
+backend/
+  app.py
+  routers/
+    health.py
+    data.py
+    model.py
+    backtest.py
+    regime.py
+  services/
+    collector.py
+    features.py
+    models.py
+    rules.py
+    market_stream.py
+    metrics.py
+```
+
+Primary endpoints:
+
+```text
+GET  /health/
+GET  /data/candles?symbol=NEARUSDT&interval=1m&limit=300
+GET  /data/signals?symbol=NEARUSDT&interval=1m&limit=300
+POST /model/train?symbol=NEARUSDT&interval=1m&limit=500
+POST /model/predict?symbol=NEARUSDT&interval=1m&limit=500
+```
+
+Run backend stack:
+
+```powershell
 Copy-Item .env.example .env
-# (Opcional/segurança) Ajuste AUTH_TOKEN e API_ALLOW_ORIGINS
-```
-
-2) Subir a stack
-```bash
 docker-compose up --build
 ```
 
-3) Acessos
-- Backend (docs): `http://localhost:8000/docs`
-- Frontend: `http://localhost:3000`
+Backend docs:
 
-4) Fluxo sugerido
-- Clique “Treinar baseline” na home → gera `backend/data/models/baseline_logreg.pkl`.
-- Clique “Predizer agora” → retorna JSON com `prob_down`, `rule_short`, `fused` e `last`.
-
-Volumes/persistência
-- Modelo e dados são mantidos em `backend/data/*` e mapeados para o container (`./backend/data:/app/data`).
-
----
-
-## Variáveis de Ambiente (principais)
-```ini
-EXCHANGE=BINGX | BINANCE
-BINGX_BASE_URL=https://open-api.bingx.com
-BINANCE_BASE_URL=https://api.binance.com
-DEFAULT_SYMBOL=NEARUSDT
-DEFAULT_INTERVAL=1m
-CANDLES_LIMIT=500
-CANDLES_CACHE_SEC=15
-HTTP_RETRIES=2
-HTTP_BACKOFF_BASE=0.6
-REGIME_SNAPSHOT_TTL_SEC=120
-PG_HOST=db
-PG_PORT=5432
-PG_DB=signals
-PG_USER=signals
-PG_PASSWORD=signals
-REDIS_HOST=redis
-REDIS_PORT=6379
-```
-Extras opcionais: `OPENAI_API_KEY`, `CRYPTOPANIC_TOKEN` (reservados p/ sentimento/notícias).
-
----
-
-## Operação, Risco e Disciplina
-- Direção preferencial: short em euforia (alinhado ao viés do projeto).
-- Stops objetivos: sempre definir hard‑stop no momento da entrada (ex.: short 125k → stop 132k).
-- Tamanho de posição: fracionado/proporcional à convicção do sinal (`SHORT_STRONG` > `SHORT_WEAK`).
-- Alavancagem: conservadora — controlar o risco de liquidação em eventos bruscos.
-- Regime de mercado: elevar limiares em bull markets para filtrar rompimentos genuínos.
-- Gestão ativa: mover stop a favor após deslocamento significativo (lock‑in de ganhos).
-
----
-
-## Roadmap
-- Backtest completo: P&L, Sharpe, MaxDD, custos e slippage (rota `backtest` hoje é stub).
-- Persistência de sinais/execuções no Postgres (`db`).
-- Cache e filas de jobs no Redis (`redis`).
-- Streaming (WebSocket) de candles e sinais.
-- Parametrização de limiares por símbolo/timeframe.
-- Camada de execução (paper trading primeiro; real somente após validação robusta).
-
----
-
-## Troubleshooting
-- Modelo não encontrado em `/model/predict`:
-  - Rode `POST /model/train` ou use o botão “Treinar baseline”.
-- CORS ao desenvolver fora de `localhost`:
-  - Ajustar middleware CORS em `backend/app.py`.
-- BingX indisponível:
-  - Fallback automático para Binance — verifique conectividade ou troque `EXCHANGE` para `BINANCE`.
-- Docker com volumes em Windows:
-  - Verificar permissões do diretório `backend/data` se o modelo não persistir.
-
----
-
-## Segurança e Observabilidade
-- Chaves/API: use `.env` local, não commitar segredos.
-- Proteção básica: defina `AUTH_TOKEN` e limite `API_ALLOW_ORIGINS` (por padrão apenas localhost).
-- Backends protegidos: se `AUTH_TOKEN` estiver definido, rotas `/data`, `/model` e `/regime` exigem header `Authorization: Bearer <token>`.
-- Produção: restringir CORS, ativar logs estruturados e métricas (a adicionar).
-- Resiliência: coletores com `timeout` e fallback — ampliar com retries backoff exponencial.
-
----
-
-## Aviso Legal
-Este repositório é educativo e experimental. Cripto é altamente volátil. Nenhuma recomendação de investimento. Teste, valide (backtest/forward) e use gestão de risco rigorosa. Você é o único responsável por suas decisões.
-
----
-
-## Estrutura (referência)
-```
-neural-edge-trading/
-├─ docker-compose.yml
-├─ .env.example
-├─ backend/
-│  ├─ app.py
-│  ├─ routers/
-│  │  ├─ health.py
-│  │  ├─ data.py
-│  │  ├─ model.py
-│  │  ├─ backtest.py
-│  ├─ services/
-│  │  ├─ collector.py
-│  │  ├─ features.py
-│  │  ├─ models.py
-│  │  ├─ rules.py
-│  │  ├─ utils.py
-│  ├─ data/
-│  │  ├─ raw/
-│  │  ├─ processed/
-│  │  └─ models/
-│  └─ requirements.txt
-└─ frontend/
-   ├─ index.html
-   ├─ signals.html
-   ├─ settings.html
-   ├─ assets/
-   │  └─ style.css
-   └─ js/
-      └─ app.js
+```text
+http://localhost:8000/docs
 ```
 
-Pronto para `docker-compose up --build`.
+---
+
+## RTTS: Rust Real-Time Trading System
+
+The Rust crate is a production-oriented skeleton for a microstructure-aware scalp engine. It is designed around bounded Tokio channels, deterministic state transitions, and paper execution by default.
+
+It shifts the execution path from:
+
+```text
+signal -> execute
+```
+
+to:
+
+```text
+market updates
+-> microstructure state
+-> adaptive decision
+-> position/risk
+-> multi-scenario meta-decision
+-> smart paper execution
+```
+
+### RTTS Structure
+
+```text
+rtts/
+  Cargo.toml
+  src/
+    main.rs              # CLI, tracing, pipeline start
+    config.rs            # Runtime config, latency, and risk knobs
+    ingestion.rs         # Binance websocket or deterministic mock feed
+    orderbook.rs         # Delta L2 book, walls, spoof/pull/absorption
+    tape.rs              # Aggressive flow, delta, bursts, exhaustion
+    context_engine.rs    # O(1) market context and regime classification
+    microstructure.rs    # Normalized features and regime output
+    adaptive_engine.rs   # Dynamic scoring and adversarial defense
+    scenario_simulator.rs # Continuation/reversal/chop estimates
+    ev_calculator.rs     # Slippage/latency-adjusted expected value
+    entry_quality.rs     # Timing/liquidity/orderflow entry score
+    competition_model.rs # Opportunity crowding and consumed-edge risk
+    meta_engine.rs       # Final judge: execute, wait, or skip
+    learning.rs          # Exponential online threshold/weight updates
+    position.rs          # One evolving position with scale/decay logic
+    risk.rs              # Hard risk, stale-data, DD, kill-switch checks
+    execution_smart.rs   # Market/limit choice, partial fill, replace
+    metrics.rs           # Prometheus text endpoint
+    pipeline.rs          # Bounded mpsc wiring
+    types.rs             # Shared domain structs
+```
+
+### RTTS Pipeline
+
+1. `ingestion` emits raw `TradeEvent` and `BookDelta` updates.
+2. `orderbook` maintains L2 bid/ask depth by price tick and computes depth, top pressure, weighted imbalance, liquidity clusters, spoofing, liquidity pulls, and absorption.
+3. `tape` tracks aggressive buy/sell volume, delta, trade frequency, bursts, exhaustion, and continuation.
+4. `context_engine` classifies regimes: `Normal`, `HighVolatility`, `NewsShock`, `LowLiquidity`, and `TrendExpansion`.
+5. `microstructure` normalizes features online and emits numeric market regime values plus compact `MarketContext`.
+6. `adaptive_engine` produces direction, confidence, urgency, expected duration, and pre-trade slippage.
+7. `position` treats entries and scale-ins as one evolving position. It reduces size in low liquidity and allows more scale in trend expansion.
+8. `risk` rejects stale, over-budget, over-risk, and abnormal orders before meta evaluation.
+9. `meta_engine` is the final judge. It simulates continuation/reversal/chop, computes adjusted EV, scores entry quality, estimates competition, waits for confirmation when needed, and returns `Execute`, `Wait`, or `Skip`.
+10. `execution_smart` chooses market vs limit only after approval, then simulates partial fills, cancel/replace, slippage, and learning feedback.
+11. `learning` adjusts thresholds and feature weights using lightweight exponential updates.
+12. `metrics` exposes latency, EV, entry quality, competition score, skipped/executed decisions, slippage, microtrade PnL, hit rate by regime, scale efficiency, position size, drawdown, and backpressure.
+
+---
+
+## Running RTTS
+
+Mock feed:
+
+```powershell
+cd rtts
+cargo run -- --exchange mock --symbol BTCUSDT
+```
+
+Binance websocket feed:
+
+```powershell
+cd rtts
+cargo run -- --exchange binance --symbol BTCUSDT
+```
+
+Metrics:
+
+```text
+http://127.0.0.1:9898/metrics
+```
+
+Useful RTTS environment variables:
+
+```powershell
+$env:RTTS_CHANNEL_CAP="4096"
+$env:RTTS_WINDOW_MS="500"
+$env:RTTS_MAX_RISK_PCT="0.005"
+$env:RTTS_DAILY_DD_PCT="0.02"
+$env:RTTS_BASE_ORDER_USD="25"
+$env:RTTS_MAX_ENTRIES="4"
+$env:RTTS_STOP_LOSS_BPS="25"
+$env:RTTS_MAX_DATA_AGE_MS="250"
+$env:RTTS_MAX_DECISION_LATENCY_US="1500"
+$env:RTTS_MAX_EXECUTION_LATENCY_US="8000"
+$env:RTTS_MAX_CONSECUTIVE_LOSSES="3"
+```
+
+Validation:
+
+```powershell
+cd rtts
+cargo fmt
+cargo check
+cargo test
+```
+
+---
+
+## Core Trading Behavior
+
+The RTTS does not execute just because a signal exists.
+
+Before an order reaches execution, the system checks:
+
+- microstructure direction
+- orderflow alignment
+- L2 depth and liquidity support
+- volatility/spread regime
+- stale data and latency
+- risk budget
+- scenario EV
+- worst-case loss
+- entry quality
+- competition/crowding risk
+- recent execution quality
+
+Final decision:
+
+```rust
+enum FinalDecision {
+    Execute,
+    Wait,
+    Skip,
+}
+```
+
+`Skip` is a first-class decision. The system is designed to avoid overtrading.
+
+---
+
+## Market Context Regimes
+
+The context engine is deterministic and hot-path safe. It uses no external APIs and no NLP.
+
+Detected regimes:
+
+- `Normal`
+- `HighVolatility`
+- `NewsShock`
+- `LowLiquidity`
+- `TrendExpansion`
+
+Inputs:
+
+- volatility spikes
+- spread widening
+- orderbook depth collapse
+- trade velocity bursts
+- sudden imbalance shifts
+- liquidity pulls
+
+Behavior:
+
+- `NewsShock`: block execution.
+- `LowLiquidity`: block new risk in meta engine and reduce size if risk-reducing logic is needed.
+- `HighVolatility`: tighten thresholds.
+- `TrendExpansion`: allow stronger scaling only when orderflow and liquidity support agree.
+- `Normal`: use standard thresholds.
+
+---
+
+## Safety And Reality Check
+
+This repository is educational and experimental. Crypto is highly volatile. This is not investment advice.
+
+The Rust RTTS is still paper-execution focused. Real exchange execution needs:
+
+- authenticated persistent order sessions
+- client order IDs and idempotency
+- exchange ACK/cancel/replace reconciliation
+- queue position modeling
+- self-trade prevention
+- real markout analysis
+- per-symbol calibration
+- production kill switches
+
+This system still loses to institutional HFT firms on:
+
+- colocation
+- direct/private market data
+- hardware timestamping
+- kernel bypass networking
+- queue modeling
+- venue-specific execution infrastructure
+
+The goal here is not to pretend to be colocated HFT. The goal is to enforce better decision quality, reduce false positives, control execution risk, and avoid trading when the edge is not statistically validated.
+
