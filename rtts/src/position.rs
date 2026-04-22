@@ -2,8 +2,8 @@ use crate::{
     config::Config,
     metrics::Metrics,
     types::{
-        Decision, Direction, FillEvent, OrderIntent, OrderRequest, OrderType, Position, RegimeKind,
-        ScoredDecision, Side,
+        Decision, Direction, FillEvent, FlowSignal, OrderIntent, OrderRequest, OrderType, Position,
+        RegimeKind, ScoredDecision, Side, TimingSignal,
     },
 };
 use std::{sync::Arc, time::Instant};
@@ -89,9 +89,13 @@ fn decide_order(
     };
 
     match signal.decision {
-        Decision::EnterSmall if !position.is_open() => {
+        Decision::EnterSmall if !position.is_open() && allow_micro_entry(signal) => {
             let size = quote_to_base(
-                cfg.base_order_usd * signal.confidence.max(0.35) * context_size_factor(signal),
+                cfg.base_order_usd
+                    * 0.35
+                    * signal.confidence.max(0.35)
+                    * context_size_factor(signal)
+                    * flow_size_factor(signal),
                 signal.market.price,
             );
             Some(intent(cfg, side, size, false, signal, position))
@@ -105,7 +109,7 @@ fn decide_order(
                 0.0
             };
             let entry_multiplier =
-                1.0 + position.entries as f64 * 0.30 + signal.confidence * 0.25 + regime_boost;
+                0.55 + position.entries as f64 * 0.22 + signal.confidence * 0.20 + regime_boost;
             let size = quote_to_base(cfg.base_order_usd * entry_multiplier, signal.market.price);
             Some(intent(cfg, side, size, false, signal, position))
         }
@@ -136,6 +140,8 @@ fn can_scale(
         && position.entries < max_entries
         && signal.score > last_score
         && signal.confidence > 0.45
+        && signal.flow.signal == FlowSignal::StrongContinuation
+        && signal.timing.signal != TimingSignal::Missed
         && signal.features.order_flow_delta.signum()
             == if desired_side == Side::Buy { 1.0 } else { -1.0 }
         && signal.features.weighted_imbalance.signum()
@@ -181,7 +187,29 @@ fn intent(
         data_latency_ms: signal.data_latency_ms,
         regime: signal.regime.clone(),
         context: signal.context.clone(),
+        flow: signal.flow,
+        timing: signal.timing,
         meta: None,
+    }
+}
+
+fn allow_micro_entry(signal: &ScoredDecision) -> bool {
+    matches!(
+        signal.flow.signal,
+        FlowSignal::StrongContinuation | FlowSignal::WeakContinuation
+    ) && matches!(
+        signal.timing.signal,
+        TimingSignal::Optimal | TimingSignal::Neutral
+    ) && signal.flow.continuation_strength > 0.42
+        && signal.timing.timing_score > 0.45
+}
+
+fn flow_size_factor(signal: &ScoredDecision) -> f64 {
+    match signal.flow.signal {
+        FlowSignal::StrongContinuation => 1.0,
+        FlowSignal::WeakContinuation => 0.65,
+        FlowSignal::Exhaustion => 0.25,
+        FlowSignal::ReversalRisk => 0.0,
     }
 }
 
