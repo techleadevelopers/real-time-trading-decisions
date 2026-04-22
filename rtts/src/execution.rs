@@ -59,7 +59,14 @@ async fn paper_submit(intent: &OrderIntent) -> Result<FillEvent, ()> {
         side: intent.request.side,
         size: intent.request.size,
         price: fill_price,
+        requested_price: reference,
+        filled_size: intent.request.size,
+        remaining_size: 0.0,
         fee,
         timestamp: intent.timestamp,
+        latency_us: 0,
+        expected_slippage_bps: intent.expected_slippage_bps,
+        actual_slippage_bps: slip_bps.abs(),
+        complete: true,
     })
 }
