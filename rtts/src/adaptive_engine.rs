@@ -3,8 +3,8 @@ use crate::{
     learning::LearningState,
     metrics::Metrics,
     types::{
-        Decision, Direction, Event, LearningSample, MarketEvent, MicrostructureFrame,
-        ScoredDecision, Side,
+        Decision, Direction, Event, FlowSignal, LearningSample, MarketEvent, MicrostructureFrame,
+        ScoredDecision, Side, TimingSignal,
     },
 };
 use std::{sync::Arc, time::Instant};
@@ -80,8 +80,12 @@ fn score_frame(
         + weights.imbalance * frame.features.weighted_imbalance * side_factor
         + weights.liquidity * liquidity_support
         + 0.35 * frame.tape.continuation
+        + 0.42 * frame.flow.continuation_strength
+        + 0.28 * frame.timing.timing_score
         - weights.spread * (frame.regime.spread / 10.0)
-        - weights.adversarial * adversarial_risk;
+        - weights.adversarial * adversarial_risk
+        - flow_penalty(frame.flow.signal)
+        - timing_penalty(frame.timing.signal);
     let score = sigmoid(raw).clamp(0.0, 1.0);
     let confidence = ((score - 0.5).abs() * 2.0 * (1.0 - adversarial_risk)).clamp(0.0, 1.0);
     let threshold = learning.threshold(&frame.regime);
@@ -103,6 +107,14 @@ fn score_frame(
         Decision::Ignore
     } else if stale_or_slow {
         Decision::Ignore
+    } else if frame.timing.signal == TimingSignal::Missed {
+        Decision::Ignore
+    } else if frame.flow.signal == FlowSignal::ReversalRisk {
+        Decision::Exit
+    } else if frame.timing.signal != TimingSignal::Optimal
+        && !matches!(frame.flow.signal, FlowSignal::StrongContinuation)
+    {
+        Decision::Ignore
     } else if adversarial_risk > 0.82 {
         Decision::Exit
     } else if score < 0.38 || previous_score - score > 0.18 {
@@ -122,6 +134,8 @@ fn score_frame(
         features: frame.features.clone(),
         regime: frame.regime.clone(),
         context: frame.context.clone(),
+        flow: frame.flow,
+        timing: frame.timing,
         direction,
         confidence,
         continuation_prob: score,
@@ -133,6 +147,24 @@ fn score_frame(
         expected_slippage_bps,
         data_latency_ms,
         adversarial_risk,
+    }
+}
+
+fn flow_penalty(signal: FlowSignal) -> f64 {
+    match signal {
+        FlowSignal::StrongContinuation => 0.0,
+        FlowSignal::WeakContinuation => 0.18,
+        FlowSignal::Exhaustion => 0.55,
+        FlowSignal::ReversalRisk => 1.05,
+    }
+}
+
+fn timing_penalty(signal: TimingSignal) -> f64 {
+    match signal {
+        TimingSignal::Optimal => 0.0,
+        TimingSignal::Neutral => 0.16,
+        TimingSignal::Wait => 0.42,
+        TimingSignal::Missed => 0.95,
     }
 }
 
