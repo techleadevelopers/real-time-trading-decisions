@@ -1,7 +1,9 @@
 use crate::{
     config::Config,
     metrics::Metrics,
-    types::{Decision, Event, FillEvent, OrderIntent, OrderRequest, Position, ScoredDecision, Side},
+    types::{
+        Decision, Event, FillEvent, OrderIntent, OrderRequest, Position, ScoredDecision, Side,
+    },
 };
 use std::{sync::Arc, time::Instant};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -16,7 +18,7 @@ pub async fn run(
 ) {
     let mut position = Position::default();
     let mut last_score = 0.0;
-    let mut last_price = 0.0;
+    let mut last_price: f64 = 0.0;
 
     loop {
         tokio::select! {
@@ -75,7 +77,9 @@ fn decide_order(
             let size = quote_to_base(cfg.base_order_usd, signal.market.price);
             Some(intent(cfg, side, size, signal, position))
         }
-        Decision::EnterSmall | Decision::ScaleIn if can_scale(position, signal, last_score, side, cfg.max_entries) => {
+        Decision::EnterSmall | Decision::ScaleIn
+            if can_scale(position, signal, last_score, side, cfg.max_entries) =>
+        {
             let entry_multiplier = 1.0 + position.entries as f64 * 0.35;
             let size = quote_to_base(cfg.base_order_usd * entry_multiplier, signal.market.price);
             Some(intent(cfg, side, size, signal, position))
@@ -158,4 +162,3 @@ fn apply_fill(position: &mut Position, fill: &FillEvent) {
         }
     }
 }
-
