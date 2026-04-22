@@ -10,4 +10,3 @@ pub mod pipeline;
 pub mod position;
 pub mod risk;
 pub mod types;
-
