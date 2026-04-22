@@ -121,6 +121,7 @@ fn score_frame(
         event,
         features: frame.features.clone(),
         regime: frame.regime.clone(),
+        context: frame.context.clone(),
         direction,
         confidence,
         continuation_prob: score,
