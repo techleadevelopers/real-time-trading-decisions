@@ -19,6 +19,16 @@ pub struct Metrics {
     pub rejected_orders_total: IntCounterVec,
     pub channel_backpressure_total: IntCounterVec,
     pub stage_latency_us: HistogramVec,
+    pub execution_latency_us: HistogramVec,
+    pub slippage_bps: HistogramVec,
+    pub microtrade_pnl: HistogramVec,
+    pub hit_rate: GaugeVec,
+    pub scale_efficiency: GaugeVec,
+    pub meta_decisions_total: IntCounterVec,
+    pub ev_adjusted: HistogramVec,
+    pub entry_quality: HistogramVec,
+    pub competition_score: HistogramVec,
+    pub false_positives_avoided: IntCounterVec,
     pub position_size: GaugeVec,
     pub drawdown: GaugeVec,
 }
@@ -63,6 +73,66 @@ impl Metrics {
             ]),
             &["stage"],
         )?;
+        let execution_latency_us = HistogramVec::new(
+            HistogramOpts::new(
+                "rtts_execution_latency_us",
+                "Order submit-to-fill latency in microseconds",
+            )
+            .buckets(vec![
+                50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10_000.0,
+            ]),
+            &["order_type"],
+        )?;
+        let slippage_bps = HistogramVec::new(
+            HistogramOpts::new("rtts_slippage_bps", "Actual slippage in basis points")
+                .buckets(vec![-2.0, -1.0, 0.0, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0]),
+            &["side"],
+        )?;
+        let microtrade_pnl = HistogramVec::new(
+            HistogramOpts::new("rtts_microtrade_pnl", "Per microtrade paper PnL")
+                .buckets(vec![-10.0, -5.0, -2.0, -1.0, 0.0, 1.0, 2.0, 5.0, 10.0]),
+            &["symbol"],
+        )?;
+        let hit_rate = GaugeVec::new(
+            prometheus::Opts::new("rtts_hit_rate_by_regime", "Adaptive hit rate by regime"),
+            &["regime"],
+        )?;
+        let scale_efficiency = GaugeVec::new(
+            prometheus::Opts::new(
+                "rtts_scale_efficiency",
+                "PnL per added unit of scaled exposure",
+            ),
+            &["symbol"],
+        )?;
+        let meta_decisions_total = IntCounterVec::new(
+            prometheus::Opts::new("rtts_meta_decisions_total", "Final meta decisions"),
+            &["decision", "reason"],
+        )?;
+        let ev_adjusted = HistogramVec::new(
+            HistogramOpts::new(
+                "rtts_adjusted_ev",
+                "Latency and slippage adjusted expected value",
+            )
+            .buckets(vec![-10.0, -5.0, -2.0, -1.0, 0.0, 0.5, 1.0, 2.0, 5.0, 10.0]),
+            &["symbol"],
+        )?;
+        let entry_quality = HistogramVec::new(
+            HistogramOpts::new("rtts_entry_quality", "Meta entry quality score")
+                .buckets(vec![0.0, 0.25, 0.40, 0.55, 0.65, 0.75, 0.85, 0.95, 1.0]),
+            &["symbol"],
+        )?;
+        let competition_score = HistogramVec::new(
+            HistogramOpts::new("rtts_competition_score", "Estimated opportunity crowding")
+                .buckets(vec![0.0, 0.25, 0.40, 0.55, 0.70, 0.85, 1.0]),
+            &["symbol"],
+        )?;
+        let false_positives_avoided = IntCounterVec::new(
+            prometheus::Opts::new(
+                "rtts_false_positives_avoided_total",
+                "Signals skipped by meta engine that likely avoided poor execution",
+            ),
+            &["reason"],
+        )?;
         let position_size = GaugeVec::new(
             prometheus::Opts::new("rtts_position_size", "Signed current position size"),
             &["symbol"],
@@ -79,6 +149,16 @@ impl Metrics {
         registry.register(Box::new(rejected_orders_total.clone()))?;
         registry.register(Box::new(channel_backpressure_total.clone()))?;
         registry.register(Box::new(stage_latency_us.clone()))?;
+        registry.register(Box::new(execution_latency_us.clone()))?;
+        registry.register(Box::new(slippage_bps.clone()))?;
+        registry.register(Box::new(microtrade_pnl.clone()))?;
+        registry.register(Box::new(hit_rate.clone()))?;
+        registry.register(Box::new(scale_efficiency.clone()))?;
+        registry.register(Box::new(meta_decisions_total.clone()))?;
+        registry.register(Box::new(ev_adjusted.clone()))?;
+        registry.register(Box::new(entry_quality.clone()))?;
+        registry.register(Box::new(competition_score.clone()))?;
+        registry.register(Box::new(false_positives_avoided.clone()))?;
         registry.register(Box::new(position_size.clone()))?;
         registry.register(Box::new(drawdown.clone()))?;
 
@@ -91,6 +171,16 @@ impl Metrics {
             rejected_orders_total,
             channel_backpressure_total,
             stage_latency_us,
+            execution_latency_us,
+            slippage_bps,
+            microtrade_pnl,
+            hit_rate,
+            scale_efficiency,
+            meta_decisions_total,
+            ev_adjusted,
+            entry_quality,
+            competition_score,
+            false_positives_avoided,
             position_size,
             drawdown,
         }))
