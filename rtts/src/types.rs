@@ -137,4 +137,3 @@ pub struct FillEvent {
     pub fee: f64,
     pub timestamp: u64,
 }
-
