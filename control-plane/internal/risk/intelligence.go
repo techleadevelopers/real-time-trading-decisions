@@ -35,6 +35,10 @@ type RiskDecision struct {
 	ExpectedValue  ExpectedValue
 	RiskScore      float64
 	Reason         string
+	Action         string
+	ReasonCategory FailureCategory
+	RegimeState    RegimeState
+	Confidence     float64
 }
 
 type IntelligenceSnapshot struct {
@@ -50,6 +54,7 @@ type IntelligenceSnapshot struct {
 	OutbidLikelihoodIndex     float64
 	RejectionCount            uint64
 	CircuitState              CircuitState
+	Feedback                  FeedbackSnapshot
 }
 
 type IntelligenceEngine struct {
@@ -57,6 +62,7 @@ type IntelligenceEngine struct {
 	store    *state.Store
 	mempool  MempoolPressureModel
 	evModel  ExpectedValueModel
+	feedback *FeedbackEngine
 	snapshot atomic.Value // IntelligenceSnapshot
 
 	lastPrice      float64
@@ -72,9 +78,9 @@ type IntelligenceEngine struct {
 	circuit        atomic.Uint32
 }
 
-func NewIntelligenceEngine(cfg config.RiskConfig, store *state.Store) *IntelligenceEngine {
-	e := &IntelligenceEngine{cfg: cfg, store: store, evModel: NewExpectedValueModel(), inclusionEMA: 0.50}
-	e.snapshot.Store(IntelligenceSnapshot{RiskMultiplier: 1.0, CircuitState: CircuitClosed, HistoricalInclusionRate: 0.50})
+func NewIntelligenceEngine(cfg config.RiskConfig, store *state.Store, feedback *FeedbackEngine) *IntelligenceEngine {
+	e := &IntelligenceEngine{cfg: cfg, store: store, evModel: NewExpectedValueModel(), feedback: feedback, inclusionEMA: 0.50}
+	e.snapshot.Store(IntelligenceSnapshot{RiskMultiplier: 1.0, CircuitState: CircuitClosed, HistoricalInclusionRate: 0.50, Feedback: feedback.Snapshot()})
 	return e
 }
 
@@ -135,7 +141,7 @@ func (e *IntelligenceEngine) Evaluate(req domain.ExecutionRequest, base RiskDeci
 		return base
 	}
 	if snap.CircuitState == CircuitOpen || snap.SystemStressIndex > 0.85 {
-		return RiskDecision{Allowed: false, SizeMultiplier: 0, ExpectedValue: snap.ExpectedValue, RiskScore: snap.SystemStressIndex, Reason: "system_stress_open"}
+		return decision(false, 0, snap.ExpectedValue, snap.SystemStressIndex, "system_stress_open", FailureExecutionFail, snap.Feedback.RegimeState, confidence(snap, snap.Feedback))
 	}
 	price := 0.0
 	if req.Price != nil {
@@ -147,42 +153,65 @@ func (e *IntelligenceEngine) Evaluate(req domain.ExecutionRequest, base RiskDeci
 	latency := time.Since(req.SignalTime)
 	evNow := e.evModel.Compute(req, price, latency, snap)
 	evFinal := e.evModel.Compute(req, price, latency+50*time.Millisecond, snap)
-	if evNow.AdjustedEV < 0 {
-		return RiskDecision{Allowed: false, SizeMultiplier: 0, ExpectedValue: evNow, RiskScore: snap.SystemStressIndex, Reason: "negative_adjusted_ev"}
+	realizedThreshold := riskAdjustedThreshold(snap, snap.Feedback)
+	expectedRealizedMarkout := req.ExpectedRealizedMarkout
+	if expectedRealizedMarkout == 0 {
+		expectedRealizedMarkout = snap.Feedback.ExpectedRealizedMarkoutEMA
 	}
-	if evFinal.AdjustedEV < 0 {
-		return RiskDecision{Allowed: false, SizeMultiplier: 0, ExpectedValue: evFinal, RiskScore: snap.SystemStressIndex, Reason: "ev_decay_cancel"}
+	if !req.ReduceOnly && expectedRealizedMarkout <= realizedThreshold {
+		return decision(false, 0, evFinal, snap.SystemStressIndex, "expected_real_markout_below_threshold", FailureRiskReject, snap.Feedback.RegimeState, confidence(snap, snap.Feedback))
+	}
+	if snap.Feedback.RegimeState == RegimeHostile && !req.ReduceOnly {
+		return decision(false, 0, evFinal, snap.SystemStressIndex, "hostile_execution_regime", FailureRiskReject, snap.Feedback.RegimeState, confidence(snap, snap.Feedback))
+	}
+	if snap.Feedback.RegimeState == RegimeContaminated && !req.ReduceOnly {
+		return decision(false, 0, evFinal, snap.SystemStressIndex, "execution_truth_contaminated", FailureRiskReject, snap.Feedback.RegimeState, 0.05)
 	}
 	mult := snap.RiskMultiplier
 	reason := "allowed"
+	action := "allow"
+	category := FailureCategory("")
+	if snap.Feedback.RegimeState == RegimeDegraded {
+		mult = min(mult, 0.55)
+		reason = "regime_degraded"
+		action = "degrade"
+	}
 	if evFinal.AdjustedEV < evNow.EV*0.15 {
 		mult = min(mult, 0.55)
 		reason = "marginal_ev_reduce"
+		action = "degrade"
 	}
 	if evFinal.TimeDecayFactor < 0.55 {
 		mult = min(mult, 0.45)
 		reason = "time_decay_reduce"
+		action = "degrade"
 	}
 	if snap.CircuitState == CircuitDegraded {
 		mult = min(mult, 0.50)
 		reason = "circuit_degraded"
+		action = "degrade"
 	}
 	if snap.MempoolPressureScore > 0.65 {
 		mult = min(mult, 0.65)
 		reason = "mempool_pressure_reduce"
+		action = "degrade"
 	}
 	if snap.ExecutionFragilityScore > 0.55 {
 		mult = min(mult, 0.55)
 		reason = "execution_fragility_reduce"
+		action = "degrade"
 	}
 	if snap.ExposureRiskScore > 0.70 && !req.ReduceOnly {
 		mult = min(mult, 0.50)
 		reason = "exposure_risk_reduce"
+		action = "degrade"
 	}
 	if mult <= 0.05 && !req.ReduceOnly {
-		return RiskDecision{Allowed: false, SizeMultiplier: 0, ExpectedValue: evFinal, RiskScore: snap.SystemStressIndex, Reason: "risk_multiplier_zero"}
+		return decision(false, 0, evFinal, snap.SystemStressIndex, "risk_multiplier_zero", FailureRiskReject, snap.Feedback.RegimeState, confidence(snap, snap.Feedback))
 	}
-	return RiskDecision{Allowed: true, SizeMultiplier: mult, ExpectedValue: evFinal, RiskScore: snap.SystemStressIndex, Reason: reason}
+	out := decision(true, mult, evFinal, snap.SystemStressIndex, reason, category, snap.Feedback.RegimeState, confidence(snap, snap.Feedback))
+	out.Action = action
+	return out
 }
 
 func (e *IntelligenceEngine) recompute(marks map[string]float64, mempool float64) IntelligenceSnapshot {
@@ -192,13 +221,15 @@ func (e *IntelligenceEngine) recompute(marks map[string]float64, mempool float64
 	} else {
 		exposure = e.Snapshot().ExposureRiskScore
 	}
-	fragility := clamp01(0.45*clamp01(e.latencyEMA/float64(e.cfg.LatencyRejectAfter.Milliseconds()+1)) + 0.35*e.failEMA + 0.20*e.rejectEMA)
+	feedback := e.feedback.Snapshot()
+	fragility := clamp01(0.30*clamp01(e.latencyEMA/float64(e.cfg.LatencyRejectAfter.Milliseconds()+1)) + 0.25*e.failEMA + 0.15*e.rejectEMA + 0.30*feedback.ExecutionFailureRateEMA)
 	vol := clamp01(e.volEMA / 8.0)
-	stress := clamp01(0.30*exposure + 0.27*mempool + 0.28*fragility + 0.15*vol)
+	markoutStress := clamp01(0.35*feedback.MarkoutDegradationScore + 0.30*feedback.AdverseSelectionEMA + 0.20*clamp01(feedback.SlippageVarianceEMA/36.0) + 0.15*feedback.PartialFillLossRateEMA)
+	stress := clamp01(0.20*exposure + 0.20*mempool + 0.25*fragility + 0.15*vol + 0.20*markoutStress)
 	state := CircuitClosed
-	if stress > 0.90 || e.failEMA > 0.75 {
+	if stress > 0.90 || e.failEMA > 0.75 || feedback.RegimeState == RegimeHostile {
 		state = CircuitOpen
-	} else if stress > 0.55 || (vol > 0.45 && mempool > 0.45) {
+	} else if stress > 0.55 || (vol > 0.45 && mempool > 0.45) || feedback.RegimeState == RegimeDegraded {
 		state = CircuitDegraded
 	}
 	mult := clamp01(1.0 - stress*0.65)
@@ -220,10 +251,56 @@ func (e *IntelligenceEngine) recompute(marks map[string]float64, mempool float64
 		OutbidLikelihoodIndex:     e.mempool.OutbidLikelihoodIndex(),
 		RejectionCount:            e.rejections.Load(),
 		CircuitState:              state,
+		Feedback:                  feedback,
 	}
 	e.circuit.Store(uint32(state))
 	e.snapshot.Store(snap)
 	return snap
+}
+
+func riskAdjustedThreshold(snap IntelligenceSnapshot, feedback FeedbackSnapshot) float64 {
+	return 0.001 +
+		0.20*snap.MempoolPressureScore +
+		0.18*snap.LatencyAdvantagePenalty +
+		0.20*clamp01(feedback.SlippageVarianceEMA/36.0) +
+		0.22*feedback.MarkoutDegradationScore +
+		0.20*feedback.AdverseSelectionEMA
+}
+
+func confidence(snap IntelligenceSnapshot, feedback FeedbackSnapshot) float64 {
+	dataConfidence := 0.30
+	if feedback.RealEvents >= 20 {
+		dataConfidence = 0.80
+	} else if feedback.RealEvents > 0 {
+		dataConfidence = 0.45 + float64(feedback.RealEvents)*0.015
+	}
+	contaminationPenalty := 0.0
+	total := feedback.RealEvents + feedback.ContaminatedEvents
+	if total > 0 {
+		contaminationPenalty = float64(feedback.ContaminatedEvents) / float64(total)
+	}
+	return clamp01(dataConfidence * (1.0 - contaminationPenalty) * (1.0 - snap.SystemStressIndex*0.35))
+}
+
+func decision(allowed bool, mult float64, ev ExpectedValue, riskScore float64, reason string, category FailureCategory, regime RegimeState, conf float64) RiskDecision {
+	action := "deny"
+	if allowed {
+		action = "allow"
+		if mult > 0 && mult < 1 {
+			action = "degrade"
+		}
+	}
+	return RiskDecision{
+		Allowed:        allowed,
+		SizeMultiplier: mult,
+		ExpectedValue:  ev,
+		RiskScore:      riskScore,
+		Reason:         reason,
+		Action:         action,
+		ReasonCategory: category,
+		RegimeState:    regime,
+		Confidence:     conf,
+	}
 }
 
 func ema(prev, value, alpha float64) float64 {
