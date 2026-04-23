@@ -34,6 +34,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /status", s.status)
 	mux.HandleFunc("GET /positions", s.positions)
 	mux.HandleFunc("GET /risk", s.riskStatus)
+	mux.HandleFunc("POST /risk/execution-events", s.executionEvent)
 	mux.HandleFunc("POST /kill-switch", s.killSwitch)
 	mux.HandleFunc("POST /execution/requests", s.executionRequest)
 	mux.HandleFunc("GET /ws", s.hub.ServeWS)
@@ -59,6 +60,19 @@ func (s *Server) positions(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) riskStatus(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.risk.Status())
+}
+
+func (s *Server) executionEvent(w http.ResponseWriter, r *http.Request) {
+	var event domain.ExecutionEvent
+	if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_json"})
+		return
+	}
+	s.risk.ObserveExecutionEvent(event)
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"ok":     true,
+		"status": s.risk.Status(),
+	})
 }
 
 func (s *Server) killSwitch(w http.ResponseWriter, r *http.Request) {
