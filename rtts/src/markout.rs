@@ -21,6 +21,7 @@ impl MarkoutAnalysisEngine {
             pnl_100ms: markout(fill_price, filled_size, side, bps_100),
             pnl_500ms: markout(fill_price, filled_size, side, bps_500),
             pnl_1s: markout(fill_price, filled_size, side, bps_1s),
+            pnl_5s: markout(fill_price, filled_size, side, bps_1s * 1.8),
         }
     }
 }
