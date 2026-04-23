@@ -401,6 +401,45 @@ pub struct MarkoutSnapshot {
     pub pnl_100ms: f64,
     pub pnl_500ms: f64,
     pub pnl_1s: f64,
+    pub pnl_5s: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ExecutionTruth {
+    pub request_timestamp: u64,
+    pub send_timestamp: u64,
+    pub ack_timestamp: u64,
+    pub exchange_accept_timestamp: u64,
+    pub first_fill_timestamp: u64,
+    pub last_fill_timestamp: u64,
+    pub partial_fill_ratio: f64,
+    pub cancel_reason: Option<&'static str>,
+    pub reject_reason: Option<&'static str>,
+    pub spread_at_execution: f64,
+    pub queue_delay_us: u64,
+    pub simulated: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CompetitionFlag {
+    #[default]
+    None,
+    SlowFill,
+    RepeatedOutbid,
+    CancelLatency,
+    PartialFillToxicity,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExecutionEvent {
+    pub symbol: String,
+    pub fill_quality: f64,
+    pub slippage_real: f64,
+    pub adverse_selection_score: f64,
+    pub markout_curve: MarkoutSnapshot,
+    pub execution_latency_us: u64,
+    pub competition_flag: CompetitionFlag,
+    pub truth: ExecutionTruth,
 }
 
 #[derive(Clone, Debug)]
@@ -465,6 +504,7 @@ pub struct FillEvent {
     pub micro_exit: MicroExitSignal,
     pub markout: MarkoutSnapshot,
     pub complete: bool,
+    pub truth: ExecutionTruth,
 }
 
 #[derive(Clone, Debug)]
@@ -481,5 +521,6 @@ pub struct LearningSample {
     pub markout_100ms: f64,
     pub markout_500ms: f64,
     pub markout_1s: f64,
+    pub markout_5s: f64,
     pub regime: MarketRegime,
 }
