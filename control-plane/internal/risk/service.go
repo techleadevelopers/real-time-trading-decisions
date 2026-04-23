@@ -25,15 +25,18 @@ type Service struct {
 	lastMarkBits  atomic.Uint64
 	marks         map[string]float64
 	intelligence  *IntelligenceEngine
+	feedback      *FeedbackEngine
 }
 
 func NewService(cfg config.RiskConfig, store *state.Store) *Service {
+	feedback := NewFeedbackEngine()
 	return &Service{
 		cfg:          cfg,
 		store:        store,
 		breakers:     make(map[string]bool),
 		marks:        make(map[string]float64),
-		intelligence: NewIntelligenceEngine(cfg, store),
+		feedback:     feedback,
+		intelligence: NewIntelligenceEngine(cfg, store, feedback),
 	}
 }
 
@@ -58,29 +61,29 @@ func (s *Service) ObserveMarket(event domain.MarketEvent) {
 
 func (s *Service) Evaluate(req domain.ExecutionRequest) RiskDecision {
 	if s.kill.Load() {
-		return s.observeDecision(RiskDecision{Allowed: false, RiskScore: 1, Reason: "kill_switch"})
+		return s.observeDecision(RiskDecision{Allowed: false, RiskScore: 1, Reason: "kill_switch", Action: "deny", ReasonCategory: FailureRiskReject, RegimeState: s.feedback.Snapshot().RegimeState, Confidence: 1})
 	}
 	if s.forcedBreaker.Load() {
-		return s.observeDecision(RiskDecision{Allowed: false, RiskScore: s.intelligence.Snapshot().SystemStressIndex, Reason: "symbol_circuit_breaker"})
+		return s.observeDecision(RiskDecision{Allowed: false, RiskScore: s.intelligence.Snapshot().SystemStressIndex, Reason: "symbol_circuit_breaker", Action: "deny", ReasonCategory: FailureRiskReject, RegimeState: s.feedback.Snapshot().RegimeState, Confidence: 1})
 	}
 	if req.Decision != domain.DecisionExecute {
-		return s.observeDecision(RiskDecision{Allowed: false, RiskScore: 0, Reason: "not_execute_decision"})
+		return s.observeDecision(RiskDecision{Allowed: false, RiskScore: 0, Reason: "not_execute_decision", Action: "deny", ReasonCategory: FailureRiskReject, RegimeState: s.feedback.Snapshot().RegimeState, Confidence: 1})
 	}
 	if time.Since(req.SignalTime) > s.cfg.MaxSignalAge {
-		return s.observeDecision(RiskDecision{Allowed: false, RiskScore: s.intelligence.Snapshot().SystemStressIndex, Reason: "stale_signal"})
+		return s.observeDecision(RiskDecision{Allowed: false, RiskScore: s.intelligence.Snapshot().SystemStressIndex, Reason: "stale_signal", Action: "deny", ReasonCategory: FailureStaleSkip, RegimeState: s.feedback.Snapshot().RegimeState, Confidence: 1})
 	}
 	if req.Size <= 0 {
-		return s.observeDecision(RiskDecision{Allowed: false, RiskScore: 0, Reason: "bad_size"})
+		return s.observeDecision(RiskDecision{Allowed: false, RiskScore: 0, Reason: "bad_size", Action: "deny", ReasonCategory: FailureRiskReject, RegimeState: s.feedback.Snapshot().RegimeState, Confidence: 1})
 	}
 	if math.Float64frombits(s.dailyPnLBits.Load()) <= -s.cfg.MaxDailyLossUSD {
-		return s.observeDecision(RiskDecision{Allowed: false, RiskScore: 1, Reason: "daily_loss_limit"})
+		return s.observeDecision(RiskDecision{Allowed: false, RiskScore: 1, Reason: "daily_loss_limit", Action: "deny", ReasonCategory: FailureRiskReject, RegimeState: s.feedback.Snapshot().RegimeState, Confidence: 1})
 	}
 	price := math.Float64frombits(s.lastMarkBits.Load())
 	if req.Price != nil {
 		price = *req.Price
 	}
 	if price <= 0 {
-		return s.observeDecision(RiskDecision{Allowed: false, RiskScore: 0.5, Reason: "missing_mark_price"})
+		return s.observeDecision(RiskDecision{Allowed: false, RiskScore: 0.5, Reason: "missing_mark_price", Action: "deny", ReasonCategory: FailureStaleSkip, RegimeState: s.feedback.Snapshot().RegimeState, Confidence: 0.8})
 	}
 	orderNotional := req.Size * price
 	dynamicPositionLimit := s.cfg.MaxPositionUSD
@@ -88,15 +91,15 @@ func (s *Service) Evaluate(req domain.ExecutionRequest) RiskDecision {
 		dynamicPositionLimit *= 0.65
 	}
 	if !req.ReduceOnly && orderNotional > s.cfg.MaxPositionUSD {
-		return s.observeDecision(RiskDecision{Allowed: false, RiskScore: s.intelligence.Snapshot().ExposureRiskScore, Reason: "position_limit"})
+		return s.observeDecision(RiskDecision{Allowed: false, RiskScore: s.intelligence.Snapshot().ExposureRiskScore, Reason: "position_limit", Action: "deny", ReasonCategory: FailureRiskReject, RegimeState: s.feedback.Snapshot().RegimeState, Confidence: 1})
 	}
 	if !req.ReduceOnly && orderNotional > dynamicPositionLimit {
-		return s.observeDecision(RiskDecision{Allowed: false, RiskScore: s.intelligence.Snapshot().ExposureRiskScore, Reason: "dynamic_position_limit"})
+		return s.observeDecision(RiskDecision{Allowed: false, RiskScore: s.intelligence.Snapshot().ExposureRiskScore, Reason: "dynamic_position_limit", Action: "deny", ReasonCategory: FailureRiskReject, RegimeState: s.feedback.Snapshot().RegimeState, Confidence: 1})
 	}
 	if req.Price == nil {
 		req.Price = &price
 	}
-	base := RiskDecision{Allowed: true, SizeMultiplier: 1, RiskScore: s.intelligence.Snapshot().SystemStressIndex, Reason: "allowed"}
+	base := RiskDecision{Allowed: true, SizeMultiplier: 1, RiskScore: s.intelligence.Snapshot().SystemStressIndex, Reason: "allowed", Action: "allow", RegimeState: s.feedback.Snapshot().RegimeState, Confidence: 1}
 	return s.observeDecision(s.intelligence.Evaluate(req, base))
 }
 
@@ -110,11 +113,28 @@ func (s *Service) Validate(req domain.ExecutionRequest) error {
 
 func (s *Service) ObserveExecution(latency time.Duration, rejected bool) {
 	s.intelligence.ObserveExecution(latency, rejected)
+	if rejected {
+		s.feedback.ObserveFailure(FailureExecutionFail)
+	}
+}
+
+func (s *Service) ObserveExecutionEvent(event domain.ExecutionEvent) {
+	s.feedback.ObserveExecutionEvent(event)
+	s.intelligence.recompute(nil, s.intelligence.Snapshot().MempoolPressureScore)
+}
+
+func (s *Service) ObserveFailure(category FailureCategory) {
+	s.feedback.ObserveFailure(category)
+	s.intelligence.recompute(nil, s.intelligence.Snapshot().MempoolPressureScore)
 }
 
 func (s *Service) observeDecision(decision RiskDecision) RiskDecision {
 	if !decision.Allowed {
-		s.intelligence.ObserveExecution(0, true)
+		category := decision.ReasonCategory
+		if category == "" {
+			category = FailureRiskReject
+		}
+		s.feedback.ObserveFailure(category)
 	}
 	return decision
 }
@@ -145,6 +165,7 @@ func (s *Service) Status() domain.RiskStatus {
 	}
 	s.mu.RUnlock()
 	snap := s.intelligence.Snapshot()
+	feedback := s.feedback.Snapshot()
 	return domain.RiskStatus{
 		KillSwitch:               s.kill.Load(),
 		DailyPnL:                 math.Float64frombits(s.dailyPnLBits.Load()),
@@ -157,6 +178,22 @@ func (s *Service) Status() domain.RiskStatus {
 		ActiveCircuitState:       snap.CircuitState.String(),
 		CurrentRiskMultiplier:    snap.RiskMultiplier,
 		RejectionCountLastWindow: snap.RejectionCount,
+		RegimeState:              string(feedback.RegimeState),
+		RealEvents:               feedback.RealEvents,
+		ContaminatedEvents:       feedback.ContaminatedEvents,
+		FailureBreakdown: map[string]uint64{
+			string(FailureRiskReject):      feedback.RiskRejects,
+			string(FailureExecutionFail):   feedback.ExecutionFails,
+			string(FailureOutbidFail):      feedback.OutbidFails,
+			string(FailureStaleSkip):       feedback.StaleSkips,
+			string(FailureMarketCancel):    feedback.MarketCancels,
+			string(FailurePartialFillLoss): feedback.PartialFillLosses,
+		},
+		RealizedPnLEMA:          feedback.RealizedPnLEMA,
+		MarkoutDegradationScore: feedback.MarkoutDegradationScore,
+		AdverseSelectionEMA:     feedback.AdverseSelectionEMA,
+		SlippageVarianceEMA:     feedback.SlippageVarianceEMA,
+		ExecutionFailureRateEMA: feedback.ExecutionFailureRateEMA,
 	}
 }
 
