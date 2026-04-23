@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from routers import health, data, model, backtest
 from routers import frontend
 from routers import regime
+from routers import execution_learning
 from services.market_stream import start_stream
 from services.utils import API_ALLOW_ORIGINS
 from deps import verify_token
@@ -38,6 +39,12 @@ app.include_router(
     regime.router,
     prefix="/regime",
     tags=["regime"],
+    dependencies=[Depends(verify_token)],
+)
+app.include_router(
+    execution_learning.router,
+    prefix="/execution-learning",
+    tags=["execution-learning"],
     dependencies=[Depends(verify_token)],
 )
 
