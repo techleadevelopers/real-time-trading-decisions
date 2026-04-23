@@ -82,8 +82,15 @@ type Position struct {
 }
 
 type RiskStatus struct {
-	KillSwitch      bool            `json:"kill_switch"`
-	DailyPnL        float64         `json:"daily_pnl"`
-	MaxDailyLossUSD float64         `json:"max_daily_loss_usd"`
-	CircuitBreakers map[string]bool `json:"circuit_breakers"`
+	KillSwitch               bool            `json:"kill_switch"`
+	DailyPnL                 float64         `json:"daily_pnl"`
+	MaxDailyLossUSD          float64         `json:"max_daily_loss_usd"`
+	CircuitBreakers          map[string]bool `json:"circuit_breakers"`
+	SystemStressIndex        float64         `json:"system_stress_index"`
+	MempoolPressure          float64         `json:"mempool_pressure"`
+	ExecutionFragility       float64         `json:"execution_fragility"`
+	ExposureRisk             float64         `json:"exposure_risk"`
+	ActiveCircuitState       string          `json:"active_circuit_state"`
+	CurrentRiskMultiplier    float64         `json:"current_risk_multiplier"`
+	RejectionCountLastWindow uint64          `json:"rejection_count_last_window"`
 }
