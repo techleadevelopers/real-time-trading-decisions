@@ -9,11 +9,14 @@ use crate::{
     queue_position::QueuePositionEngine,
     symbol_profile::SymbolProfileEngine,
     types::{
-        ExecutionMode, FillEvent, FlowSignal, LearningSample, MarkoutSnapshot, MicroExitSignal,
+        ExecutionMode, ExecutionTruth, FillEvent, FlowSignal, MarkoutSnapshot, MicroExitSignal,
         OrderIntent, OrderType, QueueEstimate, Side, TimingSignal,
     },
 };
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::Arc,
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{info, warn};
 
@@ -21,7 +24,7 @@ pub async fn run(
     cfg: Config,
     mut rx: Receiver<OrderIntent>,
     fill_tx: Sender<FillEvent>,
-    learning_tx: Sender<LearningSample>,
+    truth_fill_tx: Sender<FillEvent>,
     metrics: Arc<Metrics>,
 ) {
     let mut symbol_profile = SymbolProfileEngine::new(cfg.symbol.clone());
@@ -35,12 +38,21 @@ pub async fn run(
                 .inc();
             continue;
         }
-        if intent.meta.as_ref().is_some_and(|meta| {
-            meta.decision != crate::types::FinalDecision::Execute || meta.adjusted_ev <= 0.0
-        }) {
+        if intent
+            .meta
+            .as_ref()
+            .is_some_and(|meta| meta.decision != crate::types::FinalDecision::Execute)
+        {
             metrics
                 .rejected_orders_total
                 .with_label_values(&["meta_not_execute"])
+                .inc();
+            continue;
+        }
+        if expected_real_markout_after_cost(&intent) <= execution_threshold(&cfg) {
+            metrics
+                .rejected_orders_total
+                .with_label_values(&["weak_expected_real_markout"])
                 .inc();
             continue;
         }
@@ -73,21 +85,14 @@ pub async fn run(
                         .with_label_values(&[side_label])
                         .observe(fill.actual_slippage_bps);
 
-                    let sample = learning_sample(&intent, &fill);
-                    metrics
-                        .microtrade_pnl
-                        .with_label_values(&[&intent.request.symbol])
-                        .observe(sample.pnl);
-                    let _ = learning_tx.try_send(sample);
-
                     let exit_fill = immediate_exit_fill(&intent, &fill);
+                    let _ = truth_fill_tx.try_send(fill.clone());
                     if fill_tx.send(fill).await.is_err() {
                         warn!("fill receiver dropped");
                         break;
                     }
                     if let Some(exit_fill) = exit_fill {
-                        let exit_sample = learning_sample(&intent, &exit_fill);
-                        let _ = learning_tx.try_send(exit_sample);
+                        let _ = truth_fill_tx.try_send(exit_fill.clone());
                         if fill_tx.send(exit_fill).await.is_err() {
                             warn!("exit fill receiver dropped");
                         }
@@ -144,6 +149,7 @@ async fn paper_submit(
     child_size: f64,
     started: Instant,
 ) -> Result<FillEvent, ()> {
+    let send_timestamp = now_ms();
     let reference = intent.request.price.unwrap_or(intent.last_price);
     let adverse_selection = AdverseSelectionDetector::pre_fill_score(intent);
     if adverse_selection > 0.78 && !intent.request.reduce_only {
@@ -189,6 +195,25 @@ async fn paper_submit(
         };
     let latency_us = started.elapsed().as_micros() as u64;
     let markout = MarkoutAnalysisEngine::estimate(intent, fill_price, filled_size);
+    let fill_timestamp = now_ms();
+    let truth = ExecutionTruth {
+        request_timestamp: intent.timestamp,
+        send_timestamp,
+        ack_timestamp: send_timestamp,
+        exchange_accept_timestamp: send_timestamp,
+        first_fill_timestamp: fill_timestamp,
+        last_fill_timestamp: fill_timestamp,
+        partial_fill_ratio: if intent.request.size > 0.0 {
+            (filled_size / intent.request.size).clamp(0.0, 1.0)
+        } else {
+            0.0
+        },
+        cancel_reason: None,
+        reject_reason: None,
+        spread_at_execution: intent.regime.spread,
+        queue_delay_us: latency_us,
+        simulated: true,
+    };
     let mut fill = FillEvent {
         symbol: intent.request.symbol.clone(),
         side: intent.request.side,
@@ -207,6 +232,7 @@ async fn paper_submit(
         micro_exit: MicroExitSignal::default(),
         markout,
         complete: remaining_size <= intent.request.size * 0.001,
+        truth,
     };
     let adverse_post = AdverseSelectionDetector::post_fill_score(intent, &fill);
     fill.micro_exit = MicroExitEngine::evaluate(intent, fill.price, adverse_post);
@@ -251,37 +277,6 @@ fn cancel_replace(intent: &mut OrderIntent, remaining: f64) {
     }
 }
 
-fn learning_sample(intent: &OrderIntent, fill: &FillEvent) -> LearningSample {
-    let side_sign = match intent.request.side {
-        Side::Buy => 1.0,
-        Side::Sell => -1.0,
-    };
-    let markout = (intent.last_price - fill.price) * fill.filled_size * side_sign;
-    LearningSample {
-        timestamp: fill.timestamp,
-        direction: if intent.request.side == Side::Buy {
-            crate::types::Direction::Long
-        } else {
-            crate::types::Direction::Short
-        },
-        confidence: intent.score,
-        predicted_score: intent.score,
-        expected_slippage_bps: fill.expected_slippage_bps,
-        actual_slippage_bps: fill.actual_slippage_bps,
-        pnl: markout - fill.fee,
-        duration_ms: (fill.latency_us / 1_000).max(1),
-        entry_quality: intent
-            .meta
-            .as_ref()
-            .map(|meta| meta.entry_quality)
-            .unwrap_or(intent.timing.timing_score),
-        markout_100ms: fill.markout.pnl_100ms,
-        markout_500ms: fill.markout.pnl_500ms,
-        markout_1s: fill.markout.pnl_1s,
-        regime: intent.regime.clone(),
-    }
-}
-
 fn immediate_exit_fill(intent: &OrderIntent, fill: &FillEvent) -> Option<FillEvent> {
     if fill.micro_exit.reduce_ratio <= 0.0 {
         return None;
@@ -315,7 +310,41 @@ fn immediate_exit_fill(intent: &OrderIntent, fill: &FillEvent) -> Option<FillEve
         micro_exit: fill.micro_exit,
         markout: MarkoutSnapshot::default(),
         complete: true,
+        truth: ExecutionTruth {
+            request_timestamp: fill.truth.request_timestamp,
+            send_timestamp: now_ms(),
+            ack_timestamp: now_ms(),
+            exchange_accept_timestamp: now_ms(),
+            first_fill_timestamp: now_ms(),
+            last_fill_timestamp: now_ms(),
+            partial_fill_ratio: 1.0,
+            cancel_reason: None,
+            reject_reason: None,
+            spread_at_execution: intent.regime.spread,
+            queue_delay_us: fill.latency_us.saturating_add(250),
+            simulated: true,
+        },
     })
+}
+
+fn expected_real_markout_after_cost(intent: &OrderIntent) -> f64 {
+    let expected_bps = (intent.flow.continuation_strength * 5.0 + intent.timing.timing_score * 3.0
+        - intent.expected_slippage_bps
+        - intent.regime.spread.max(0.0) * 0.25)
+        .max(-10.0);
+    let notional = intent.request.size * intent.last_price;
+    notional * expected_bps / 10_000.0 - notional * 0.0004
+}
+
+fn execution_threshold(cfg: &Config) -> f64 {
+    (cfg.base_order_usd * 0.00005).max(0.001)
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
 }
 
 fn execution_mode_label(mode: ExecutionMode) -> &'static str {
