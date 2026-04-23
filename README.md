@@ -6,8 +6,11 @@ It currently has two distinct layers:
 
 - `backend/`: Python/FastAPI research API for candle-based data collection, baseline features, model training, signal inspection, and backtest endpoints.
 - `rtts/`: Rust + Tokio real-time trading system focused on event-driven, microstructure-aware scalp execution.
+- `control-plane/`: Go orchestration and real-time control layer for market-data gateway, risk, state, execution routing, REST, and WebSocket operations.
 
-The Rust RTTS is the execution-oriented core. It is not candle-based. It consumes trade prints and L2 order book updates, builds microstructure state, evaluates multiple scenarios, and only sends paper orders after risk and meta-decision validation.
+The Rust RTTS is the low-latency decision and execution-intelligence core. It is not candle-based. It consumes trade prints and L2 order book updates, builds microstructure state, evaluates multiple scenarios, and emits execution decisions.
+
+The Go control-plane is the operational brain. It receives execution requests from Rust, applies idempotency and global risk controls, maintains order/position state, and forwards approved orders to the exchange API layer. The current exchange implementation is paper trading and is designed to be replaced by an authenticated exchange client.
 
 The `frontend/` directory is intentionally private/local and ignored by Git. It is not part of the public repository.
 
@@ -19,6 +22,7 @@ The `frontend/` directory is intentionally private/local and ignored by Git. It 
 neural-edge-trading/
   backend/              # FastAPI research and model API
   rtts/                 # Rust real-time trading system
+  control-plane/        # Go orchestration and execution control service
   docker-compose.yml    # Backend/db/redis local stack
   .env.example          # Environment template
   README.md             # This file
@@ -29,6 +33,8 @@ Ignored local-only paths:
 ```text
 frontend/
 rtts/target/
+control-plane/bin/
+control-plane/dist/
 ```
 
 These are intentionally not pushed to GitHub.
@@ -255,6 +261,85 @@ enum FinalDecision {
 ```
 
 `Skip` is a first-class decision. The system is designed to avoid overtrading.
+
+---
+
+## Control Plane: Go Operational Layer
+
+The Go `control-plane` service connects research, RTTS decisions, market-data operations, risk controls, and execution routing.
+
+Responsibilities:
+
+- Binance WebSocket market-data gateway for trades and top L2 depth.
+- Goroutine/channel event pipeline with bounded buffers.
+- Backpressure handling in ingestion and update streaming.
+- HTTP execution endpoint for Rust RTTS decisions.
+- Idempotency keys per order.
+- Pre-trade risk checks: kill switch, circuit breaker, exposure, position limits, stale signal rejection.
+- In-memory position and order state.
+- Order lifecycle state machine: `NEW -> SENT -> PARTIAL -> FILLED -> CANCELED`.
+- REST API and WebSocket live updates.
+
+Structure:
+
+```text
+control-plane/
+  cmd/control-plane/main.go
+  internal/
+    api/          # REST and WebSocket gateway
+    config/       # env-driven configuration
+    domain/       # shared structs
+    execution/    # execution gateway and exchange client interface
+    marketdata/   # Binance websocket gateway
+    pipeline/     # event processing
+    risk/         # kill switch, breakers, exposure checks
+    state/        # in-memory positions/orders/idempotency
+  Dockerfile
+  README.md
+```
+
+Run:
+
+```powershell
+cd control-plane
+go mod tidy
+go run ./cmd/control-plane
+```
+
+Verify:
+
+```powershell
+cd control-plane
+go test -count=1 ./...
+```
+
+API:
+
+```text
+GET  /health
+GET  /status
+GET  /positions
+GET  /risk
+POST /kill-switch
+POST /execution/requests
+GET  /ws
+```
+
+Example Rust RTTS execution request:
+
+```json
+{
+  "idempotency_key": "BTCUSDT-1700000000-1",
+  "symbol": "BTCUSDT",
+  "side": "BUY",
+  "size": 0.001,
+  "price": 67000.0,
+  "decision": "Execute",
+  "signal_time": "2026-04-22T12:00:00Z",
+  "max_slippage_bps": 3.0,
+  "reduce_only": false
+}
+```
 
 ---
 
