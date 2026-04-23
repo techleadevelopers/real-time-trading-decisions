@@ -1,11 +1,14 @@
 use crate::{
     metrics::Metrics,
     types::{
-        ExecutionMode, FillEvent, MarkoutSnapshot, MicroExitSignal, OrderIntent, QueueEstimate,
-        Side,
+        ExecutionMode, ExecutionTruth, FillEvent, MarkoutSnapshot, MicroExitSignal, OrderIntent,
+        QueueEstimate, Side,
     },
 };
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{info, warn};
 
@@ -75,5 +78,26 @@ async fn paper_submit(intent: &OrderIntent) -> Result<FillEvent, ()> {
         micro_exit: MicroExitSignal::default(),
         markout: MarkoutSnapshot::default(),
         complete: true,
+        truth: ExecutionTruth {
+            request_timestamp: intent.timestamp,
+            send_timestamp: now_ms(),
+            ack_timestamp: now_ms(),
+            exchange_accept_timestamp: now_ms(),
+            first_fill_timestamp: now_ms(),
+            last_fill_timestamp: now_ms(),
+            partial_fill_ratio: 1.0,
+            cancel_reason: None,
+            reject_reason: None,
+            spread_at_execution: intent.regime.spread,
+            queue_delay_us: 0,
+            simulated: true,
+        },
     })
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
 }
