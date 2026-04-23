@@ -34,6 +34,9 @@ func (s *Store) ReserveOrder(order domain.Order) (domain.Order, bool, error) {
 	now := time.Now().UTC()
 	order.CreatedAt = now
 	order.UpdatedAt = now
+	if order.RequestAt.IsZero() {
+		order.RequestAt = now
+	}
 	order.Status = domain.OrderNew
 	s.orders[order.ID] = order
 	s.idempotency[order.IdempotencyKey] = order.ID
@@ -50,13 +53,25 @@ func (s *Store) UpdateOrder(order domain.Order) {
 func (s *Store) ApplyFill(order domain.Order, fillQty, fillPrice float64) domain.Position {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	previousFilled := order.Filled
 	order.Filled += fillQty
+	if order.Filled > 0 {
+		order.WeightedAvgFillPrice = ((order.WeightedAvgFillPrice * previousFilled) + (fillPrice * fillQty)) / order.Filled
+	}
+	order.PartialFillRatio = order.Filled / max(order.Size, 1e-12)
+	if order.FirstFillAt.IsZero() && fillQty > 0 {
+		order.FirstFillAt = now
+	}
+	if fillQty > 0 {
+		order.LastFillAt = now
+	}
 	if order.Filled >= order.Size {
 		order.Status = domain.OrderFilled
 	} else {
 		order.Status = domain.OrderPartial
 	}
-	order.UpdatedAt = time.Now().UTC()
+	order.UpdatedAt = now
 	s.orders[order.ID] = order
 
 	pos := s.positions[order.Symbol]
@@ -68,15 +83,15 @@ func (s *Store) ApplyFill(order domain.Order, fillQty, fillPrice float64) domain
 	oldNotional := pos.AvgPrice * abs(pos.Size)
 	fillNotional := fillPrice * fillQty
 	if abs(newSize) < 1e-12 {
-		pos = domain.Position{Symbol: order.Symbol, Updated: time.Now().UTC()}
+		pos = domain.Position{Symbol: order.Symbol, Updated: now}
 	} else if pos.Size == 0 || sign(pos.Size) == sign(signed) {
 		pos.AvgPrice = (oldNotional + fillNotional) / abs(newSize)
 		pos.Size = newSize
 		pos.Symbol = order.Symbol
-		pos.Updated = time.Now().UTC()
+		pos.Updated = now
 	} else {
 		pos.Size = newSize
-		pos.Updated = time.Now().UTC()
+		pos.Updated = now
 	}
 	s.positions[order.Symbol] = pos
 	return pos
@@ -137,4 +152,11 @@ func sign(v float64) float64 {
 		return 1
 	}
 	return 0
+}
+
+func max(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
 }
