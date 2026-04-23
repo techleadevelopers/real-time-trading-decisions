@@ -32,6 +32,10 @@ func NewGateway(store *state.Store, riskSvc *risk.Service, exchange ExchangeClie
 
 func (g *Gateway) Submit(ctx context.Context, req domain.ExecutionRequest) (domain.Order, error) {
 	started := time.Now()
+	requestAt := req.RequestTime
+	if requestAt.IsZero() {
+		requestAt = started.UTC()
+	}
 	if req.IdempotencyKey == "" {
 		return domain.Order{}, errors.New("missing idempotency_key")
 	}
@@ -44,7 +48,7 @@ func (g *Gateway) Submit(ctx context.Context, req domain.ExecutionRequest) (doma
 	if decision.SizeMultiplier > 0 && decision.SizeMultiplier < 1 && !req.ReduceOnly {
 		req.Size *= decision.SizeMultiplier
 	}
-	order := domain.Order{ID: newID(), IdempotencyKey: req.IdempotencyKey, Symbol: req.Symbol, Side: req.Side, Size: req.Size, Price: req.Price}
+	order := domain.Order{ID: newID(), IdempotencyKey: req.IdempotencyKey, Symbol: req.Symbol, Side: req.Side, Size: req.Size, Price: req.Price, RequestAt: requestAt, SendAt: time.Now().UTC()}
 	reserved, duplicate, err := g.store.ReserveOrder(order)
 	if duplicate {
 		return reserved, nil
