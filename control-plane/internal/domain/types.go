@@ -38,17 +38,18 @@ const (
 )
 
 type ExecutionRequest struct {
-	IdempotencyKey string        `json:"idempotency_key"`
-	Symbol         string        `json:"symbol"`
-	Side           Side          `json:"side"`
-	Size           float64       `json:"size"`
-	Price          *float64      `json:"price,omitempty"`
-	Decision       FinalDecision `json:"decision"`
-	SignalTime     time.Time     `json:"signal_time"`
-	MaxSlippageBps float64       `json:"max_slippage_bps"`
-	ReduceOnly     bool          `json:"reduce_only"`
-	RequestTime    time.Time     `json:"request_timestamp,omitempty"`
-	SendTime       time.Time     `json:"send_timestamp,omitempty"`
+	IdempotencyKey          string        `json:"idempotency_key"`
+	Symbol                  string        `json:"symbol"`
+	Side                    Side          `json:"side"`
+	Size                    float64       `json:"size"`
+	Price                   *float64      `json:"price,omitempty"`
+	Decision                FinalDecision `json:"decision"`
+	SignalTime              time.Time     `json:"signal_time"`
+	MaxSlippageBps          float64       `json:"max_slippage_bps"`
+	ReduceOnly              bool          `json:"reduce_only"`
+	RequestTime             time.Time     `json:"request_timestamp,omitempty"`
+	SendTime                time.Time     `json:"send_timestamp,omitempty"`
+	ExpectedRealizedMarkout float64       `json:"expected_realized_markout,omitempty"`
 }
 
 type OrderStatus string
@@ -96,15 +97,18 @@ type MarkoutCurve struct {
 }
 
 type ExecutionEvent struct {
-	OrderID               string        `json:"order_id"`
-	Symbol                string        `json:"symbol"`
-	FillQuality           float64       `json:"fill_quality"`
-	SlippageReal          float64       `json:"slippage_real"`
-	AdverseSelectionScore float64       `json:"adverse_selection_score"`
-	MarkoutCurve          MarkoutCurve  `json:"markout_curve"`
-	ExecutionLatency      time.Duration `json:"execution_latency"`
-	CompetitionFlag       string        `json:"competition_flag"`
-	Simulated             bool          `json:"simulated"`
+	OrderID                 string        `json:"order_id"`
+	Symbol                  string        `json:"symbol"`
+	FillQuality             float64       `json:"fill_quality"`
+	SlippageReal            float64       `json:"slippage_real"`
+	AdverseSelectionScore   float64       `json:"adverse_selection_score"`
+	MarkoutCurve            MarkoutCurve  `json:"markout_curve"`
+	ExecutionLatency        time.Duration `json:"execution_latency"`
+	CompetitionFlag         string        `json:"competition_flag"`
+	Simulated               bool          `json:"simulated"`
+	PartialFillRatio        float64       `json:"partial_fill_ratio"`
+	ExpectedRealizedMarkout float64       `json:"expected_realized_markout,omitempty"`
+	RealizedPnL             float64       `json:"realized_pnl,omitempty"`
 }
 
 type Position struct {
@@ -115,15 +119,24 @@ type Position struct {
 }
 
 type RiskStatus struct {
-	KillSwitch               bool            `json:"kill_switch"`
-	DailyPnL                 float64         `json:"daily_pnl"`
-	MaxDailyLossUSD          float64         `json:"max_daily_loss_usd"`
-	CircuitBreakers          map[string]bool `json:"circuit_breakers"`
-	SystemStressIndex        float64         `json:"system_stress_index"`
-	MempoolPressure          float64         `json:"mempool_pressure"`
-	ExecutionFragility       float64         `json:"execution_fragility"`
-	ExposureRisk             float64         `json:"exposure_risk"`
-	ActiveCircuitState       string          `json:"active_circuit_state"`
-	CurrentRiskMultiplier    float64         `json:"current_risk_multiplier"`
-	RejectionCountLastWindow uint64          `json:"rejection_count_last_window"`
+	KillSwitch               bool              `json:"kill_switch"`
+	DailyPnL                 float64           `json:"daily_pnl"`
+	MaxDailyLossUSD          float64           `json:"max_daily_loss_usd"`
+	CircuitBreakers          map[string]bool   `json:"circuit_breakers"`
+	SystemStressIndex        float64           `json:"system_stress_index"`
+	MempoolPressure          float64           `json:"mempool_pressure"`
+	ExecutionFragility       float64           `json:"execution_fragility"`
+	ExposureRisk             float64           `json:"exposure_risk"`
+	ActiveCircuitState       string            `json:"active_circuit_state"`
+	CurrentRiskMultiplier    float64           `json:"current_risk_multiplier"`
+	RejectionCountLastWindow uint64            `json:"rejection_count_last_window"`
+	RegimeState              string            `json:"regime_state"`
+	RealEvents               uint64            `json:"real_events"`
+	ContaminatedEvents       uint64            `json:"contaminated_events"`
+	FailureBreakdown         map[string]uint64 `json:"failure_breakdown"`
+	RealizedPnLEMA           float64           `json:"realized_pnl_ema"`
+	MarkoutDegradationScore  float64           `json:"markout_degradation_score"`
+	AdverseSelectionEMA      float64           `json:"adverse_selection_ema"`
+	SlippageVarianceEMA      float64           `json:"slippage_variance_ema"`
+	ExecutionFailureRateEMA  float64           `json:"execution_failure_rate_ema"`
 }
