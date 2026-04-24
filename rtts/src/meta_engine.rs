@@ -89,7 +89,11 @@ fn evaluate(cfg: &Config, state: &MetaState, intent: &OrderIntent) -> MetaDecisi
     let thresholds = thresholds(cfg, state, intent);
     let recent_success = recent_success_rate(state);
 
-    let (decision, reason) = if intent.context.regime == RegimeKind::NewsShock {
+    let (decision, reason) = if intent.edge_state == crate::accounting::edge_validation::EdgeState::Invalid {
+        (FinalDecision::Skip, "edge_invalid_halt")
+    } else if intent.competition_state == crate::types::CompetitionState::Saturated {
+        (FinalDecision::Skip, "competition_saturated")
+    } else if intent.context.regime == RegimeKind::NewsShock {
         (FinalDecision::Skip, "news_shock_block")
     } else if intent.context.regime == RegimeKind::LowLiquidity && !intent.request.reduce_only {
         (FinalDecision::Skip, "low_liquidity_no_new_risk")
@@ -103,6 +107,14 @@ fn evaluate(cfg: &Config, state: &MetaState, intent: &OrderIntent) -> MetaDecisi
         (FinalDecision::Skip, "recent_hit_rate_low")
     } else if ev.worst_case_loss > cfg.capital * cfg.max_risk_pct * 1.4 {
         (FinalDecision::Skip, "worst_case_too_large")
+    } else if intent.edge_state == crate::accounting::edge_validation::EdgeState::Uncertain
+        && intent.edge_reliability_score < 0.55
+    {
+        (FinalDecision::Wait, "edge_uncertain_degrade")
+    } else if intent.competition_state == crate::types::CompetitionState::Competitive
+        && competition_score > thresholds.competition * 0.88
+    {
+        (FinalDecision::Wait, "competition_degrade")
     } else if ev.adjusted_ev <= thresholds.ev {
         (FinalDecision::Skip, "negative_or_weak_ev")
     } else if entry_quality <= thresholds.entry_quality {
@@ -153,12 +165,28 @@ fn thresholds(cfg: &Config, state: &MetaState, intent: &OrderIntent) -> Threshol
         0.05
     } else {
         0.0
+    } + match intent.edge_state {
+        crate::accounting::edge_validation::EdgeState::Valid => 0.0,
+        crate::accounting::edge_validation::EdgeState::Uncertain => 0.08,
+        crate::accounting::edge_validation::EdgeState::Invalid => 0.20,
+    };
+    let reliability_penalty = (1.0 - intent.edge_reliability_score).clamp(0.0, 1.0) * 0.12;
+    let competition_penalty = match intent.competition_state {
+        crate::types::CompetitionState::Normal => 0.0,
+        crate::types::CompetitionState::Competitive => 0.08,
+        crate::types::CompetitionState::Saturated => 0.18,
     };
     Thresholds {
-        ev: (cfg.base_order_usd * 0.00015) + dd_pressure,
-        entry_quality: (0.58 + regime_penalty + dd_pressure * 0.5).clamp(0.50, 0.88),
-        competition: (0.78 - regime_penalty * 0.7).clamp(0.45, 0.84),
-        opportunity_rank: (0.52 + regime_penalty).clamp(0.45, 0.75),
+        ev: (cfg.base_order_usd * 0.00015) + dd_pressure + reliability_penalty + competition_penalty,
+        entry_quality: (0.58 + regime_penalty + dd_pressure * 0.5 + reliability_penalty + competition_penalty)
+            .clamp(0.50, 0.92),
+        competition: (0.78
+            - regime_penalty * 0.7
+            - intent.edge_reliability_score * 0.08
+            - competition_penalty * 0.5)
+            .clamp(0.35, 0.84),
+        opportunity_rank: (0.52 + regime_penalty + reliability_penalty + competition_penalty)
+            .clamp(0.45, 0.88),
     }
 }
 
