@@ -15,6 +15,8 @@ type Store struct {
 	positions   map[string]domain.Position
 	orders      map[string]domain.Order
 	idempotency map[string]string
+	ledger      []domain.FillLedgerEntry
+	executions  []domain.ExecutionEvent
 }
 
 func NewStore() *Store {
@@ -50,10 +52,60 @@ func (s *Store) UpdateOrder(order domain.Order) {
 	s.orders[order.ID] = order
 }
 
-func (s *Store) ApplyFill(order domain.Order, fillQty, fillPrice float64) domain.Position {
+func (s *Store) MarkOrderSent(orderID string, sentAt time.Time) (domain.Order, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	order, ok := s.orders[orderID]
+	if !ok {
+		return domain.Order{}, errors.New("order not found")
+	}
+	order.Status = domain.OrderSent
+	order.SendAt = sentAt
+	order.UpdatedAt = time.Now().UTC()
+	s.orders[order.ID] = order
+	return order, nil
+}
+
+func (s *Store) MarkOrderAck(orderID string, ackAt time.Time) (domain.Order, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	order, ok := s.orders[orderID]
+	if !ok {
+		return domain.Order{}, errors.New("order not found")
+	}
+	order.Status = domain.OrderAck
+	order.AckAt = ackAt
+	order.ExchangeAcceptAt = ackAt
+	order.UpdatedAt = time.Now().UTC()
+	s.orders[order.ID] = order
+	return order, nil
+}
+
+func (s *Store) CancelOrder(orderID, reason string, canceledAt time.Time) (domain.Order, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	order, ok := s.orders[orderID]
+	if !ok {
+		return domain.Order{}, errors.New("order not found")
+	}
+	order.Status = domain.OrderCanceled
+	order.CancelReason = reason
+	order.LastFillAt = canceledAt
+	order.UpdatedAt = time.Now().UTC()
+	s.orders[order.ID] = order
+	return order, nil
+}
+
+func (s *Store) ApplyExternalFill(orderID string, fill domain.FillLedgerEntry, event domain.ExecutionEvent) (domain.Order, domain.Position, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	order, ok := s.orders[orderID]
+	if !ok {
+		return domain.Order{}, domain.Position{}, errors.New("order not found")
+	}
 	now := time.Now().UTC()
+	fillQty := fill.Quantity
+	fillPrice := fill.Price
 	previousFilled := order.Filled
 	order.Filled += fillQty
 	if order.Filled > 0 {
@@ -61,16 +113,18 @@ func (s *Store) ApplyFill(order domain.Order, fillQty, fillPrice float64) domain
 	}
 	order.PartialFillRatio = order.Filled / max(order.Size, 1e-12)
 	if order.FirstFillAt.IsZero() && fillQty > 0 {
-		order.FirstFillAt = now
+		order.FirstFillAt = fill.EventTime
 	}
 	if fillQty > 0 {
-		order.LastFillAt = now
+		order.LastFillAt = fill.EventTime
 	}
 	if order.Filled >= order.Size {
 		order.Status = domain.OrderFilled
 	} else {
 		order.Status = domain.OrderPartial
 	}
+	order.SlippageRealBps = event.SlippageReal
+	order.QueueDelay = event.ExecutionLatency
 	order.UpdatedAt = now
 	s.orders[order.ID] = order
 
@@ -94,7 +148,63 @@ func (s *Store) ApplyFill(order domain.Order, fillQty, fillPrice float64) domain
 		pos.Updated = now
 	}
 	s.positions[order.Symbol] = pos
-	return pos
+
+	s.ledger = append(s.ledger, fill)
+	s.executions = append(s.executions, event)
+	return order, pos, nil
+}
+
+func (s *Store) Order(orderID string) (domain.Order, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	order, ok := s.orders[orderID]
+	return order, ok
+}
+
+func (s *Store) Ledger() []domain.FillLedgerEntry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]domain.FillLedgerEntry, len(s.ledger))
+	copy(out, s.ledger)
+	return out
+}
+
+func (s *Store) ExecutionEvents() []domain.ExecutionEvent {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]domain.ExecutionEvent, len(s.executions))
+	copy(out, s.executions)
+	return out
+}
+
+func (s *Store) Reconciliation() domain.ReconciliationStatus {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	ledgerByOrder := make(map[string]float64, len(s.orders))
+	exchangeByOrder := make(map[string]float64, len(s.orders))
+	for _, entry := range s.ledger {
+		ledgerByOrder[entry.OrderID] += entry.Quantity
+	}
+	for _, event := range s.executions {
+		exchangeByOrder[event.OrderID] += event.FilledQuantity
+	}
+	matched := len(ledgerByOrder) == len(exchangeByOrder)
+	if matched {
+		for orderID, qty := range exchangeByOrder {
+			if abs(qty-ledgerByOrder[orderID]) > 1e-9 {
+				matched = false
+				break
+			}
+		}
+	}
+	return domain.ReconciliationStatus{
+		OrdersTracked:          len(s.orders),
+		LedgerEntries:          len(s.ledger),
+		ExecutionEvents:        len(s.executions),
+		ExchangeFillQtyByOrder: exchangeByOrder,
+		LedgerQtyByOrder:       ledgerByOrder,
+		Matched:                matched,
+	}
 }
 
 func (s *Store) Positions() []domain.Position {
