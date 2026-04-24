@@ -6,11 +6,12 @@ import (
 
 	"control-plane/internal/api"
 	"control-plane/internal/domain"
+	"control-plane/internal/state"
 )
 
 type PaperExchange struct{}
 
-func NewPaperExchange(_ any, _ chan<- api.Update) *PaperExchange {
+func NewPaperExchange(_ *state.Store, _ chan<- api.Update) *PaperExchange {
 	return &PaperExchange{}
 }
 
