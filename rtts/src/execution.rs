@@ -1,4 +1,8 @@
 use crate::{
+    accounting::{
+        latency::LatencyBreakdown,
+        ledger::LiquidityFlag,
+    },
     metrics::Metrics,
     types::{
         ExecutionMode, ExecutionTruth, FillEvent, MarkoutSnapshot, MicroExitSignal, OrderIntent,
@@ -61,6 +65,8 @@ async fn paper_submit(intent: &OrderIntent) -> Result<FillEvent, ()> {
         "paper order filled"
     );
     Ok(FillEvent {
+        order_id: format!("ord-{}", now_ms()),
+        fill_id: format!("fill-{}", now_ms()),
         symbol: intent.request.symbol.clone(),
         side: intent.request.side,
         size: intent.request.size,
@@ -68,9 +74,21 @@ async fn paper_submit(intent: &OrderIntent) -> Result<FillEvent, ()> {
         requested_price: reference,
         filled_size: intent.request.size,
         remaining_size: 0.0,
+        liquidity_flag: LiquidityFlag::Taker,
         fee,
+        fee_asset: "USDT".to_string(),
+        rebate_amount: 0.0,
+        funding_amount: 0.0,
         timestamp: intent.timestamp,
         latency_us: 0,
+        latency_breakdown: LatencyBreakdown {
+            decision_latency_us: intent.data_latency_ms.saturating_mul(1_000),
+            send_latency_us: 0,
+            ack_latency_us: 0,
+            first_fill_latency_us: 0,
+            full_fill_latency_us: 0,
+        },
+        expected_markout: 0.0,
         expected_slippage_bps: intent.expected_slippage_bps,
         actual_slippage_bps: slip_bps.abs(),
         queue_estimate: QueueEstimate::default(),
