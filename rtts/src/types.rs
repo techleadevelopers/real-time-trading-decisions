@@ -1,3 +1,7 @@
+use crate::accounting::{
+    latency::LatencyBreakdown,
+    ledger::LiquidityFlag,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -438,6 +442,8 @@ pub struct ExecutionEvent {
     pub adverse_selection_score: f64,
     pub markout_curve: MarkoutSnapshot,
     pub execution_latency_us: u64,
+    pub latency_breakdown: LatencyBreakdown,
+    pub expected_markout: f64,
     pub competition_flag: CompetitionFlag,
     pub truth: ExecutionTruth,
 }
@@ -487,6 +493,8 @@ pub struct OrderIntent {
 
 #[derive(Clone, Debug)]
 pub struct FillEvent {
+    pub order_id: String,
+    pub fill_id: String,
     pub symbol: String,
     pub side: Side,
     pub size: f64,
@@ -494,9 +502,15 @@ pub struct FillEvent {
     pub requested_price: f64,
     pub filled_size: f64,
     pub remaining_size: f64,
+    pub liquidity_flag: LiquidityFlag,
     pub fee: f64,
+    pub fee_asset: String,
+    pub rebate_amount: f64,
+    pub funding_amount: f64,
     pub timestamp: u64,
     pub latency_us: u64,
+    pub latency_breakdown: LatencyBreakdown,
+    pub expected_markout: f64,
     pub expected_slippage_bps: f64,
     pub actual_slippage_bps: f64,
     pub queue_estimate: QueueEstimate,
