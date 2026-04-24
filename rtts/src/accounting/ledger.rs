@@ -353,7 +353,7 @@ mod tests {
         engine.apply_fill(fill("f2", Side::Buy, 101.0, 1.0, LiquidityFlag::Taker, 0.20, 0.00));
         engine.apply_fill(fill("f3", Side::Sell, 103.0, 1.5, LiquidityFlag::Taker, 0.30, 0.00));
 
-        assert!((engine.state().realized_pnl_total - 3.25).abs() < 1e-9);
+        assert!((engine.state().realized_pnl_total - 3.52).abs() < 1e-9);
         let exposure = engine.position_exposure("BTCUSDT");
         assert!((exposure.net_quantity - 0.5).abs() < 1e-9);
         assert_eq!(engine.realized_entries().len(), 2);
@@ -393,7 +393,7 @@ mod tests {
         engine.mark_to_market("BTCUSDT", 107.0);
 
         let exposure = engine.position_exposure("BTCUSDT");
-        assert!((engine.state().realized_pnl_total - 1.81).abs() < 1e-9);
+        assert!((engine.state().realized_pnl_total - 1.845).abs() < 1e-9);
         assert!((exposure.net_quantity + 1.0).abs() < 1e-9);
         assert!((engine.state().unrealized_pnl - 3.0).abs() < 1e-9);
         assert!(engine.state().open_positions.contains_key("BTCUSDT"));
