@@ -100,7 +100,7 @@ http://localhost:8000/docs
 
 ## RTTS: Rust Real-Time Trading System
 
-The Rust crate is a production-oriented microstructure decision engine. It is designed around bounded Tokio channels, deterministic state transitions, external execution truth, and ledger-based accounting.
+The Rust crate is a production-oriented microstructure decision engine. It is designed around bounded Tokio channels, deterministic state transitions, external execution truth, ledger-based accounting, and continuous statistical edge validation.
 
 It shifts the execution path from:
 
@@ -154,7 +154,7 @@ rtts/
     symbol_profile.rs    # Per-symbol spread/fill/volatility profile
     execution_smart.rs   # Execution request preparation + control-plane submission
     execution_external.rs # Control-plane WebSocket execution event consumer
-    accounting/          # Ledger, latency distributions, quality, validation
+    accounting/          # Ledger, latency distributions, edge validation, quality, validation
     metrics.rs           # Prometheus text endpoint
     pipeline.rs          # Bounded mpsc wiring
     types.rs             # Shared domain structs
@@ -169,7 +169,7 @@ rtts/
 5. `micro_timing` scores spread compression, liquidity pull, trade bursts, and micro pullbacks to decide whether entry timing is optimal, neutral, waiting, or missed.
 6. `context_engine` classifies regimes: `Normal`, `HighVolatility`, `NewsShock`, `LowLiquidity`, and `TrendExpansion`.
 7. `microstructure` normalizes features online and emits numeric market regime values plus compact `MarketContext`, flow, and timing state.
-8. `adaptive_engine` produces direction, confidence, urgency, expected duration, and pre-trade slippage, while filtering missed timing and reversal-risk flow.
+8. `adaptive_engine` produces direction, confidence, urgency, expected duration, and pre-trade slippage, while filtering missed timing and reversal-risk flow and degrading decisions when the statistical edge is uncertain or invalid.
 9. `position` consumes externally sourced fills and synchronizes the local position snapshot from accounting truth instead of deriving truth from local execution simulation.
 10. `risk` rejects stale, over-budget, over-risk, and abnormal orders before meta evaluation.
 11. `meta_engine` is the final judge. It simulates continuation/reversal/chop, computes adjusted EV, scores entry quality, estimates competition, waits for confirmation when needed, and returns `Execute`, `Wait`, or `Skip`.
@@ -177,10 +177,12 @@ rtts/
 13. `execution_smart` prepares the execution request and sends it to the Go control-plane. It no longer generates fills or acts as execution truth.
 14. `execution_external` consumes authoritative `execution_update` events from the control-plane WebSocket feed and forwards external fills into position/accounting/truth processing.
 15. `accounting` computes lot-based realized PnL from fill-ledger entries only. It supports partial fills, mixed maker/taker fees, rebates, funding fields, and unrealized PnL as derived state.
-16. `micro_exit` and `markout` evaluate take-profit, momentum fade, adverse flow, liquidity collapse, and 100ms/500ms/1s post-entry quality, but these are not accounting truth.
-17. `symbol_profile` keeps per-symbol spread, fill probability, volatility, and trade-size estimates to adapt execution.
-18. `learning` adjusts thresholds, feature weights, and scaling aggressiveness using execution outcomes and post-trade quality samples.
-19. `metrics` exposes latency, EV, entry quality, competition score, skipped/executed decisions, slippage, microtrade PnL, hit rate by regime, scale efficiency, position size, drawdown, and backpressure.
+16. `execution_truth` measures realized markout, slippage, and fill quality from external fills only and feeds online learning with real outcomes.
+17. `accounting::edge_validation` runs rolling t-tests on realized PnL, KS-tests on expected vs realized edge distributions, tracks edge error moments, estimates edge half-life, classifies `VALID/UNCERTAIN/INVALID`, and computes a dynamic capital multiplier.
+18. `micro_exit` and `markout` evaluate take-profit, momentum fade, adverse flow, liquidity collapse, and 100ms/500ms/1s post-entry quality, but these are not accounting truth.
+19. `symbol_profile` keeps per-symbol spread, fill probability, volatility, and trade-size estimates to adapt execution.
+20. `learning` adjusts thresholds, feature weights, and scaling aggressiveness using execution outcomes and post-trade quality samples.
+21. `metrics` exposes latency, EV, entry quality, competition score, skipped/executed decisions, slippage, microtrade PnL, hit rate by regime, scale efficiency, position size, drawdown, and backpressure.
 
 ---
 
@@ -257,8 +259,17 @@ Before an order reaches execution, the system checks:
 - execution mode
 - adverse selection risk
 - symbol-specific spread/fill behavior
+- rolling statistical edge validity
+- edge reliability and decay state
+- current drawdown-adjusted capital multiplier
 
 After approval, Rust submits an execution request to the control-plane. The RTTS does not manufacture fills locally. Order acknowledgements, partial fills, final fills, and cancel states come back from the control-plane as external execution events.
+
+The statistical edge engine continuously tests whether trading is justified at all:
+
+- `VALID`: trading allowed under normal risk limits
+- `UNCERTAIN`: trading degraded with smaller size and tighter thresholds
+- `INVALID`: trading halted until real execution evidence improves
 
 Final decision:
 
