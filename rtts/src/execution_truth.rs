@@ -5,7 +5,7 @@ use crate::{
     },
     metrics::Metrics,
     types::{
-        CompetitionFlag, Direction, ExecutionEvent, FillEvent, LearningSample, MarketRegime,
+        CompetitionFlag, CompetitionState, Direction, ExecutionEvent, FillEvent, LearningSample,
         MarketUpdate, MarkoutSnapshot, Side,
     },
 };
@@ -143,6 +143,7 @@ fn finalized_event(item: PendingFill) -> ExecutionEvent {
     let fill_quality = fill_quality(&fill, &markout, adverse);
     ExecutionEvent {
         symbol: fill.symbol.clone(),
+        side: fill.side,
         fill_quality,
         slippage_real: fill.actual_slippage_bps,
         adverse_selection_score: adverse,
@@ -150,32 +151,59 @@ fn finalized_event(item: PendingFill) -> ExecutionEvent {
         execution_latency_us: fill.latency_us,
         latency_breakdown: fill.latency_breakdown,
         expected_markout: fill.expected_markout,
+        fees_paid: fill.fee,
+        rebates_received: fill.rebate_amount,
+        funding_cost: fill.funding_amount,
+        regime: fill.regime.clone(),
         competition_flag: competition_flag(&fill, &markout),
         truth: fill.truth,
     }
 }
 
 fn learning_sample_from_event(event: &ExecutionEvent) -> LearningSample {
-    let side = if event.markout_curve.pnl_100ms >= 0.0 {
-        Direction::Long
+    let direction = match event.side {
+        Side::Buy => Direction::Long,
+        Side::Sell => Direction::Short,
+    };
+    let realized_pnl = event.markout_curve.pnl_500ms - event.slippage_real.max(0.0);
+    let edge_component = event.expected_markout.max(0.0);
+    let execution_loss = (event.expected_markout - realized_pnl).max(0.0);
+    let fees_rebates_component =
+        -event.fees_paid + event.rebates_received - event.funding_cost;
+    let adverse_selection_loss = (-event.markout_curve.pnl_100ms).max(0.0)
+        + (-event.markout_curve.pnl_500ms).max(0.0) * 0.25;
+    let edge_capture_ratio = if event.expected_markout.abs() > f64::EPSILON {
+        realized_pnl / event.expected_markout
     } else {
-        Direction::Short
+        0.0
     };
     LearningSample {
         timestamp: event.truth.last_fill_timestamp,
-        direction: side,
+        direction,
         confidence: event.fill_quality,
         predicted_score: event.fill_quality,
         expected_slippage_bps: 0.0,
         actual_slippage_bps: event.slippage_real,
-        pnl: event.markout_curve.pnl_500ms - event.slippage_real.max(0.0),
+        pnl: realized_pnl,
+        expected_markout: event.expected_markout,
+        realized_markout: event.markout_curve.pnl_500ms,
+        fill_ratio: event.truth.partial_fill_ratio.clamp(0.0, 1.0),
+        fees_paid: event.fees_paid,
+        rebates_received: event.rebates_received,
+        funding_cost: event.funding_cost,
+        edge_component,
+        execution_loss,
+        fees_rebates_component,
+        adverse_selection_loss,
+        edge_capture_ratio,
+        competition_state: competition_state(event),
         duration_ms: (event.execution_latency_us / 1_000).max(1),
         entry_quality: event.fill_quality,
         markout_100ms: event.markout_curve.pnl_100ms,
         markout_500ms: event.markout_curve.pnl_500ms,
         markout_1s: event.markout_curve.pnl_1s,
         markout_5s: event.markout_curve.pnl_5s,
-        regime: MarketRegime::default(),
+        regime: event.regime.clone(),
     }
 }
 
@@ -222,6 +250,9 @@ fn fill_quality(fill: &FillEvent, markout: &MarkoutSnapshot, adverse: f64) -> f6
 }
 
 fn competition_flag(fill: &FillEvent, markout: &MarkoutSnapshot) -> CompetitionFlag {
+    if !matches!(fill.competition_flag, CompetitionFlag::None) {
+        return fill.competition_flag;
+    }
     if fill.truth.queue_delay_us > 2_000 || fill.latency_us > 5_000 {
         return CompetitionFlag::SlowFill;
     }
@@ -254,4 +285,16 @@ fn build_execution_quality_report(
         },
         latency_distribution,
     )
+}
+
+fn competition_state(event: &ExecutionEvent) -> CompetitionState {
+    match event.competition_flag {
+        CompetitionFlag::None => CompetitionState::Normal,
+        CompetitionFlag::SlowFill | CompetitionFlag::CancelLatency => {
+            CompetitionState::Competitive
+        }
+        CompetitionFlag::RepeatedOutbid | CompetitionFlag::PartialFillToxicity => {
+            CompetitionState::Saturated
+        }
+    }
 }
