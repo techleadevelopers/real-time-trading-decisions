@@ -36,7 +36,6 @@ struct ControlPlaneExecutionUpdate {
 
 #[derive(Debug, Deserialize)]
 struct ControlPlaneOrder {
-    id: String,
     symbol: String,
     side: String,
     size: f64,
@@ -47,8 +46,6 @@ struct ControlPlaneOrder {
 struct ControlPlaneLedgerEntry {
     order_id: String,
     fill_id: String,
-    symbol: String,
-    side: String,
     price: f64,
     quantity: f64,
     liquidity_flag: String,
@@ -123,12 +120,11 @@ async fn handle_update(
         return;
     };
 
-    let side = parse_side(&ledger.side);
     let fill = FillEvent {
         order_id: ledger.order_id,
         fill_id: ledger.fill_id,
-        symbol: ledger.symbol.clone(),
-        side,
+        symbol: payload.order.symbol,
+        side: parse_side(&payload.order.side),
         size: payload.order.size,
         price: ledger.price,
         requested_price: payload.order.price.unwrap_or(ledger.price),
@@ -172,14 +168,14 @@ async fn handle_update(
         },
     };
 
-    metrics.fills_total.with_label_values(&[side_label(side)]).inc();
+    metrics.fills_total.with_label_values(&[side_label(fill.side)]).inc();
     metrics
         .execution_latency_us
         .with_label_values(&["external"])
         .observe(fill.latency_breakdown.full_fill_latency_us as f64);
     metrics
         .slippage_bps
-        .with_label_values(&[side_label(side)])
+        .with_label_values(&[side_label(fill.side)])
         .observe(fill.actual_slippage_bps);
 
     let _ = truth_fill_tx.try_send(fill.clone());
