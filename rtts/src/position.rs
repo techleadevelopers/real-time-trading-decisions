@@ -1,4 +1,5 @@
 use crate::{
+    accounting::ledger::{AccountingEngine, FillLedgerEntry, LotMatchingMethod},
     config::Config,
     metrics::Metrics,
     types::{
@@ -18,6 +19,7 @@ pub async fn run(
     order_tx: Sender<OrderIntent>,
     metrics: Arc<Metrics>,
 ) {
+    let mut accounting = AccountingEngine::new(LotMatchingMethod::Fifo);
     let mut position = Position::default();
     let mut last_score = 0.0;
     let mut last_price: f64 = 0.0;
@@ -27,20 +29,28 @@ pub async fn run(
             biased;
 
             Some(fill) = fill_rx.recv() => {
-                apply_fill(&mut position, &fill);
-                position.update_unrealized(last_price.max(fill.price));
+                let ledger_entry = FillLedgerEntry::from(&fill);
+                let _ = accounting.apply_fill(ledger_entry);
+                let mark_price = last_price.max(fill.price);
+                accounting.mark_to_market(&fill.symbol, mark_price);
+                sync_position_from_accounting(&mut position, &accounting, &fill.symbol);
                 metrics.position_size.with_label_values(&[&cfg.symbol]).set(position.size);
                 if position.entries > 0 {
                     metrics.scale_efficiency.with_label_values(&[&cfg.symbol]).set(
                         position.unrealized_pnl / position.entries as f64,
                     );
                 }
+                metrics
+                    .drawdown
+                    .with_label_values(&[&cfg.symbol])
+                    .set((-accounting.state().realized_pnl_total).max(0.0));
                 info!(?position, price = fill.price, "paper fill applied");
             }
             Some(signal) = decision_rx.recv() => {
                 let started = Instant::now();
                 last_price = signal.market.price;
-                position.update_unrealized(signal.market.price);
+                accounting.mark_to_market(&cfg.symbol, signal.market.price);
+                sync_position_from_accounting(&mut position, &accounting, &cfg.symbol);
 
                 if let Some(intent) = decide_order(&cfg, &position, &signal, last_score) {
                     if order_tx.try_send(intent.clone()).is_err() {
@@ -232,32 +242,24 @@ fn quote_to_base(quote_size: f64, price: f64) -> f64 {
     quote_size / price.max(f64::EPSILON)
 }
 
-fn apply_fill(position: &mut Position, fill: &FillEvent) {
-    let signed_size = match fill.side {
-        Side::Buy => fill.filled_size,
-        Side::Sell => -fill.filled_size,
-    };
-    if !position.is_open() || position.size.signum() == signed_size.signum() {
-        let new_size = position.size + signed_size;
-        let old_notional = position.avg_price * position.size.abs();
-        let fill_notional = fill.price * fill.filled_size;
-        let denom = new_size.abs().max(f64::EPSILON);
-        position.avg_price = (old_notional + fill_notional) / denom;
-        position.size = new_size;
-        position.entries = position.entries.saturating_add(1);
-        position.confidence = (position.confidence + 0.25).min(1.0);
-    } else {
-        let remaining = position.size + signed_size;
-        if remaining.abs() <= f64::EPSILON {
-            *position = Position::default();
-        } else if remaining.signum() == position.size.signum() {
-            position.size = remaining;
-        } else {
-            warn!("fill crossed through flat; opening residual position");
-            position.size = remaining;
-            position.avg_price = fill.price;
-            position.entries = 1;
-            position.confidence = 0.25;
-        }
+fn sync_position_from_accounting(
+    position: &mut Position,
+    accounting: &AccountingEngine,
+    symbol: &str,
+) {
+    let exposure = accounting.position_exposure(symbol);
+    if exposure.net_quantity.abs() <= f64::EPSILON {
+        *position = Position::default();
+        return;
     }
+    if position.is_open()
+        && position.size.signum() != exposure.net_quantity.signum()
+    {
+        warn!("accounting position crossed through flat; resetting local position snapshot");
+    }
+    position.size = exposure.net_quantity;
+    position.avg_price = exposure.avg_entry_price;
+    position.entries = exposure.open_lots as u32;
+    position.confidence = (0.25 + exposure.open_lots as f64 * 0.10).clamp(0.25, 1.0);
+    position.unrealized_pnl = exposure.unrealized_pnl;
 }
