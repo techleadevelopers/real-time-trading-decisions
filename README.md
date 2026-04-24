@@ -10,7 +10,7 @@ It currently has two distinct layers:
 
 The Rust RTTS is the low-latency decision and execution-intelligence core. It is not candle-based. It consumes trade prints and L2 order book updates, builds microstructure state, evaluates multiple scenarios, and emits execution decisions.
 
-The Go control-plane is the operational brain. It receives execution requests from Rust, applies idempotency and global risk controls, maintains order/position state, and forwards approved orders to the exchange API layer. The current exchange implementation is paper trading and is designed to be replaced by an authenticated exchange client.
+The Go control-plane is the operational brain and the authoritative execution layer. It receives execution requests from Rust, applies idempotency and global risk controls, owns the order lifecycle, emits exchange-derived execution events and fill-ledger entries, maintains reconciliation state, and forwards approved orders to the exchange API layer.
 
 The `frontend/` directory is intentionally private/local and ignored by Git. It is not part of the public repository.
 
@@ -100,7 +100,7 @@ http://localhost:8000/docs
 
 ## RTTS: Rust Real-Time Trading System
 
-The Rust crate is a production-oriented skeleton for a microstructure-aware scalp engine. It is designed around bounded Tokio channels, deterministic state transitions, and paper execution by default.
+The Rust crate is a production-oriented microstructure decision engine. It is designed around bounded Tokio channels, deterministic state transitions, external execution truth, and ledger-based accounting.
 
 It shifts the execution path from:
 
@@ -116,7 +116,9 @@ market updates
 -> adaptive decision
 -> position/risk
 -> multi-scenario meta-decision
--> smart paper execution
+-> control-plane execution request
+-> external execution event feed
+-> accounting truth
 ```
 
 ### RTTS Structure
@@ -150,7 +152,9 @@ rtts/
     micro_exit.rs        # Take-profit, fade, adverse-flow, liquidity-collapse exits
     markout.rs           # 100ms/500ms/1s post-entry markout estimates
     symbol_profile.rs    # Per-symbol spread/fill/volatility profile
-    execution_smart.rs   # Market/limit choice, partial fill, replace
+    execution_smart.rs   # Execution request preparation + control-plane submission
+    execution_external.rs # Control-plane WebSocket execution event consumer
+    accounting/          # Ledger, latency distributions, quality, validation
     metrics.rs           # Prometheus text endpoint
     pipeline.rs          # Bounded mpsc wiring
     types.rs             # Shared domain structs
@@ -166,15 +170,17 @@ rtts/
 6. `context_engine` classifies regimes: `Normal`, `HighVolatility`, `NewsShock`, `LowLiquidity`, and `TrendExpansion`.
 7. `microstructure` normalizes features online and emits numeric market regime values plus compact `MarketContext`, flow, and timing state.
 8. `adaptive_engine` produces direction, confidence, urgency, expected duration, and pre-trade slippage, while filtering missed timing and reversal-risk flow.
-9. `position` treats entries and scale-ins as one evolving position. It opens micro size first, scales only on confirmed flow/timing/liquidity, reduces size in low liquidity, and allows more scale in trend expansion.
+9. `position` consumes externally sourced fills and synchronizes the local position snapshot from accounting truth instead of deriving truth from local execution simulation.
 10. `risk` rejects stale, over-budget, over-risk, and abnormal orders before meta evaluation.
 11. `meta_engine` is the final judge. It simulates continuation/reversal/chop, computes adjusted EV, scores entry quality, estimates competition, waits for confirmation when needed, and returns `Execute`, `Wait`, or `Skip`.
-12. `queue_position`, `fill_probability`, and `execution_mode` estimate queue position, volume ahead, fill probability, and switch between aggressive, passive, and defensive execution.
-13. `execution_smart` chooses market vs limit only after approval, then simulates partial fills, cancel/replace, slippage, adverse-selection rejection, immediate defensive exits, and learning feedback.
-14. `micro_exit` and `markout` evaluate take-profit, momentum fade, adverse flow, liquidity collapse, and 100ms/500ms/1s post-entry quality.
-15. `symbol_profile` keeps per-symbol spread, fill probability, volatility, and trade-size estimates to adapt execution.
-16. `learning` adjusts thresholds, feature weights, and scaling aggressiveness using lightweight exponential updates from slippage, entry quality, PnL, duration, and markouts.
-17. `metrics` exposes latency, EV, entry quality, competition score, skipped/executed decisions, slippage, microtrade PnL, hit rate by regime, scale efficiency, position size, drawdown, and backpressure.
+12. `queue_position`, `fill_probability`, and `execution_mode` estimate queue position, volume ahead, fill probability, and preferred aggressiveness before any order request leaves Rust.
+13. `execution_smart` prepares the execution request and sends it to the Go control-plane. It no longer generates fills or acts as execution truth.
+14. `execution_external` consumes authoritative `execution_update` events from the control-plane WebSocket feed and forwards external fills into position/accounting/truth processing.
+15. `accounting` computes lot-based realized PnL from fill-ledger entries only. It supports partial fills, mixed maker/taker fees, rebates, funding fields, and unrealized PnL as derived state.
+16. `micro_exit` and `markout` evaluate take-profit, momentum fade, adverse flow, liquidity collapse, and 100ms/500ms/1s post-entry quality, but these are not accounting truth.
+17. `symbol_profile` keeps per-symbol spread, fill probability, volatility, and trade-size estimates to adapt execution.
+18. `learning` adjusts thresholds, feature weights, and scaling aggressiveness using execution outcomes and post-trade quality samples.
+19. `metrics` exposes latency, EV, entry quality, competition score, skipped/executed decisions, slippage, microtrade PnL, hit rate by regime, scale efficiency, position size, drawdown, and backpressure.
 
 ---
 
@@ -214,6 +220,8 @@ $env:RTTS_MAX_DATA_AGE_MS="250"
 $env:RTTS_MAX_DECISION_LATENCY_US="1500"
 $env:RTTS_MAX_EXECUTION_LATENCY_US="8000"
 $env:RTTS_MAX_CONSECUTIVE_LOSSES="3"
+$env:RTTS_CONTROL_PLANE_HTTP="http://127.0.0.1:8088"
+$env:RTTS_CONTROL_PLANE_WS="ws://127.0.0.1:8088/ws"
 ```
 
 Validation:
@@ -250,6 +258,8 @@ Before an order reaches execution, the system checks:
 - adverse selection risk
 - symbol-specific spread/fill behavior
 
+After approval, Rust submits an execution request to the control-plane. The RTTS does not manufacture fills locally. Order acknowledgements, partial fills, final fills, and cancel states come back from the control-plane as external execution events.
+
 Final decision:
 
 ```rust
@@ -276,8 +286,10 @@ Responsibilities:
 - HTTP execution endpoint for Rust RTTS decisions.
 - Idempotency keys per order.
 - Pre-trade risk checks: kill switch, circuit breaker, exposure, position limits, stale signal rejection.
-- In-memory position and order state.
-- Order lifecycle state machine: `NEW -> SENT -> PARTIAL -> FILLED -> CANCELED`.
+- In-memory position, order, fill-ledger, and reconciliation state.
+- Authoritative order lifecycle state machine: `NEW -> SENT -> ACK -> PARTIAL -> FILLED/CANCELED`.
+- Authoritative execution events and fill-ledger entries emitted from the exchange layer.
+- Reconciliation check: `sum(exchange fills) == sum(accounting ledger)`.
 - REST API and WebSocket live updates.
 
 Structure:
@@ -293,7 +305,7 @@ control-plane/
     marketdata/   # Binance websocket gateway
     pipeline/     # event processing
     risk/         # kill switch, breakers, exposure checks
-    state/        # in-memory positions/orders/idempotency
+    state/        # in-memory positions/orders/ledger/reconciliation
   Dockerfile
   README.md
 ```
@@ -320,6 +332,9 @@ GET  /health
 GET  /status
 GET  /positions
 GET  /risk
+GET  /execution/ledger
+GET  /execution/events
+GET  /execution/reconciliation
 POST /kill-switch
 POST /execution/requests
 GET  /ws
@@ -337,7 +352,8 @@ Example Rust RTTS execution request:
   "decision": "Execute",
   "signal_time": "2026-04-22T12:00:00Z",
   "max_slippage_bps": 3.0,
-  "reduce_only": false
+  "reduce_only": false,
+  "expected_realized_markout": 1.25
 }
 ```
 
@@ -378,15 +394,22 @@ Behavior:
 
 This repository is educational and experimental. Crypto is highly volatile. This is not investment advice.
 
-The Rust RTTS is still paper-execution focused. Real exchange execution needs:
+The execution source of truth is now control-plane driven rather than RTTS-simulated. The current exchange implementation is still a paper exchange adapter, but the architectural boundary is now aligned with live trading:
+
+- RTTS submits requests
+- control-plane owns order lifecycle
+- exchange layer emits fills
+- fill-ledger drives accounting
+- reconciliation verifies ledger consistency
+
+Remaining production work still includes:
 
 - authenticated persistent order sessions
-- client order IDs and idempotency
-- exchange ACK/cancel/replace reconciliation
+- exchange-native ACK/cancel/replace reconciliation
+- durable storage for orders, fills, and ledger state
+- venue-specific fee/funding calibration
 - queue position modeling
 - self-trade prevention
-- real markout analysis
-- per-symbol calibration
 - production kill switches
 
 This system still loses to institutional HFT firms on:
