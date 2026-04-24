@@ -5,7 +5,7 @@ use crate::{
     },
     config::Config,
     metrics::Metrics,
-    types::{ExecutionMode, ExecutionTruth, FillEvent, MarkoutSnapshot, MicroExitSignal, QueueEstimate, Side},
+    types::{CompetitionFlag, ExecutionMode, ExecutionTruth, FillEvent, MarkoutSnapshot, MarketRegime, MicroExitSignal, QueueEstimate, Side},
 };
 use futures_util::StreamExt;
 use serde::Deserialize;
@@ -32,6 +32,10 @@ struct ControlPlaneExecutionUpdate {
     first_fill_timestamp_ms: i64,
     last_fill_timestamp_ms: i64,
     expected_realized_markout: Option<f64>,
+    regime_kind: Option<String>,
+    regime_volatility: Option<f64>,
+    regime_spread: Option<f64>,
+    regime_trend_strength: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,6 +64,7 @@ struct ControlPlaneLedgerEntry {
 struct ControlPlaneExecutionEvent {
     slippage_real: f64,
     partial_fill_ratio: f64,
+    competition_flag: Option<String>,
     latency_breakdown: ControlPlaneLatencyBreakdown,
 }
 
@@ -147,10 +152,16 @@ async fn handle_update(
         expected_markout: payload.expected_realized_markout.unwrap_or_default(),
         expected_slippage_bps: 0.0,
         actual_slippage_bps: execution.slippage_real,
+        competition_flag: parse_competition_flag(execution.competition_flag.as_deref()),
         queue_estimate: QueueEstimate::default(),
         execution_mode: infer_execution_mode(payload.order.price),
         micro_exit: MicroExitSignal::default(),
         markout: MarkoutSnapshot::default(),
+        regime: MarketRegime {
+            volatility: payload.regime_volatility.unwrap_or_default(),
+            spread: payload.regime_spread.unwrap_or_default(),
+            trend_strength: payload.regime_trend_strength.unwrap_or_default(),
+        },
         complete: execution.partial_fill_ratio >= 0.999,
         truth: ExecutionTruth {
             request_timestamp: non_negative_ms(payload.request_timestamp_ms),
@@ -198,6 +209,16 @@ fn parse_liquidity_flag(raw: &str) -> LiquidityFlag {
     match raw {
         "MAKER" => LiquidityFlag::Maker,
         _ => LiquidityFlag::Taker,
+    }
+}
+
+fn parse_competition_flag(raw: Option<&str>) -> CompetitionFlag {
+    match raw.unwrap_or_default() {
+        "RepeatedOutbid" => CompetitionFlag::RepeatedOutbid,
+        "CancelLatency" => CompetitionFlag::CancelLatency,
+        "PartialFillToxicity" => CompetitionFlag::PartialFillToxicity,
+        "SlowFill" => CompetitionFlag::SlowFill,
+        _ => CompetitionFlag::None,
     }
 }
 
