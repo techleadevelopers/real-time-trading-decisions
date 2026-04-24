@@ -1,8 +1,9 @@
 use crate::{
+    accounting::edge_validation::{dynamic_position_size_multiplier, EdgeRegime, EdgeState},
     metrics::Metrics,
     model::LogisticFilter,
     types::{
-        Decision, Direction, Event, FeatureFrame, FlowState, MarketContext, MarketRegime,
+        CompetitionState, Decision, Direction, Event, FeatureFrame, FlowState, MarketContext, MarketRegime,
         MicroTimingState, ScoredDecision,
     },
 };
@@ -77,6 +78,18 @@ pub async fn run(
             expected_slippage_bps,
             data_latency_ms: 0,
             adversarial_risk: 0.0,
+            edge_state: EdgeState::Uncertain,
+            edge_regime: EdgeRegime::Stable,
+            edge_reliability_score: 0.5,
+            edge_half_life_samples: 0.0,
+            dynamic_size_multiplier: dynamic_position_size_multiplier(
+                0.5,
+                EdgeState::Uncertain,
+                EdgeRegime::Stable,
+                0.0,
+            ),
+            competition_state: CompetitionState::Normal,
+            competition_score: 0.0,
         };
         if tx.try_send(output.clone()).is_err() {
             metrics
