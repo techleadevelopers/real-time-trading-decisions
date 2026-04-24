@@ -1,4 +1,9 @@
 use crate::{
+    accounting::{
+        interfaces::ExecutionSummary,
+        latency::{latency_impact_score, LatencyBreakdown, LatencyDistributions},
+        ledger::{FillLedgerEntry, LiquidityFlag},
+    },
     adverse_selection::AdverseSelectionDetector,
     config::Config,
     execution_mode::ExecutionModeSwitch,
@@ -28,6 +33,7 @@ pub async fn run(
     metrics: Arc<Metrics>,
 ) {
     let mut symbol_profile = SymbolProfileEngine::new(cfg.symbol.clone());
+    let mut latency_distributions = LatencyDistributions::default();
 
     while let Some(mut intent) = rx.recv().await {
         let started = Instant::now();
@@ -49,7 +55,7 @@ pub async fn run(
                 .inc();
             continue;
         }
-        if expected_real_markout_after_cost(&intent) <= execution_threshold(&cfg) {
+        if expected_real_markout_after_cost(&intent, &latency_distributions) <= execution_threshold(&cfg) {
             metrics
                 .rejected_orders_total
                 .with_label_values(&["weak_expected_real_markout"])
@@ -71,19 +77,21 @@ pub async fn run(
         while remaining > intent.request.size * 0.001 && attempts < 3 {
             attempts += 1;
             let child_size = remaining;
-            match paper_submit(&intent, child_size, started).await {
+            match paper_submit(&intent, child_size, started, &latency_distributions).await {
                 Ok(fill) => {
                     remaining = fill.remaining_size;
                     symbol_profile.observe_fill(&fill);
+                    latency_distributions.record(fill.latency_breakdown);
                     metrics.fills_total.with_label_values(&[side_label]).inc();
                     metrics
                         .execution_latency_us
                         .with_label_values(&[execution_mode_label(intent.execution_mode)])
-                        .observe(fill.latency_us as f64);
+                        .observe(fill.latency_breakdown.full_fill_latency_us as f64);
                     metrics
                         .slippage_bps
                         .with_label_values(&[side_label])
                         .observe(fill.actual_slippage_bps);
+                    let _summary = execution_summary(&fill);
 
                     let exit_fill = immediate_exit_fill(&intent, &fill);
                     let _ = truth_fill_tx.try_send(fill.clone());
@@ -148,9 +156,12 @@ async fn paper_submit(
     intent: &OrderIntent,
     child_size: f64,
     started: Instant,
+    latency_distributions: &LatencyDistributions,
 ) -> Result<FillEvent, ()> {
     let send_timestamp = now_ms();
     let reference = intent.request.price.unwrap_or(intent.last_price);
+    let order_id = new_event_id("ord");
+    let fill_id = new_event_id("fill");
     let adverse_selection = AdverseSelectionDetector::pre_fill_score(intent);
     if adverse_selection > 0.78 && !intent.request.reduce_only {
         return Err(());
@@ -196,6 +207,24 @@ async fn paper_submit(
     let latency_us = started.elapsed().as_micros() as u64;
     let markout = MarkoutAnalysisEngine::estimate(intent, fill_price, filled_size);
     let fill_timestamp = now_ms();
+    let latency_breakdown = LatencyBreakdown {
+        decision_latency_us: intent.data_latency_ms.saturating_mul(1_000),
+        send_latency_us: send_timestamp.saturating_sub(intent.timestamp).saturating_mul(1_000),
+        ack_latency_us: 150,
+        first_fill_latency_us: latency_us,
+        full_fill_latency_us: latency_us,
+    };
+    let liquidity_flag = if intent.request.order_type == OrderType::Limit {
+        LiquidityFlag::Maker
+    } else {
+        LiquidityFlag::Taker
+    };
+    let rebate_amount = if liquidity_flag == LiquidityFlag::Maker {
+        fill_price * filled_size * 0.00005
+    } else {
+        0.0
+    };
+    let funding_amount = 0.0;
     let truth = ExecutionTruth {
         request_timestamp: intent.timestamp,
         send_timestamp,
@@ -215,6 +244,8 @@ async fn paper_submit(
         simulated: true,
     };
     let mut fill = FillEvent {
+        order_id,
+        fill_id,
         symbol: intent.request.symbol.clone(),
         side: intent.request.side,
         size: intent.request.size,
@@ -222,9 +253,15 @@ async fn paper_submit(
         requested_price: reference,
         filled_size,
         remaining_size,
+        liquidity_flag,
         fee,
+        fee_asset: "USDT".to_string(),
+        rebate_amount,
+        funding_amount,
         timestamp: intent.timestamp,
         latency_us,
+        latency_breakdown,
+        expected_markout: expected_real_markout_after_cost(intent, latency_distributions),
         expected_slippage_bps: intent.expected_slippage_bps,
         actual_slippage_bps,
         queue_estimate: intent.queue_estimate,
@@ -293,6 +330,8 @@ fn immediate_exit_fill(intent: &OrderIntent, fill: &FillEvent) -> Option<FillEve
     let slip = (intent.expected_slippage_bps * (1.0 + fill.micro_exit.urgency)).max(0.5);
     let price = fill.price * (1.0 + side_sign * slip / 10_000.0);
     Some(FillEvent {
+        order_id: fill.order_id.clone(),
+        fill_id: new_event_id("fill"),
         symbol: fill.symbol.clone(),
         side: exit_side,
         size: exit_size,
@@ -300,9 +339,21 @@ fn immediate_exit_fill(intent: &OrderIntent, fill: &FillEvent) -> Option<FillEve
         requested_price: fill.price,
         filled_size: exit_size,
         remaining_size: 0.0,
+        liquidity_flag: LiquidityFlag::Taker,
         fee: price * exit_size * 0.0004,
+        fee_asset: "USDT".to_string(),
+        rebate_amount: 0.0,
+        funding_amount: 0.0,
         timestamp: fill.timestamp,
         latency_us: fill.latency_us.saturating_add(250),
+        latency_breakdown: LatencyBreakdown {
+            decision_latency_us: fill.latency_breakdown.decision_latency_us,
+            send_latency_us: 100,
+            ack_latency_us: 150,
+            first_fill_latency_us: fill.latency_breakdown.first_fill_latency_us.saturating_add(250),
+            full_fill_latency_us: fill.latency_breakdown.full_fill_latency_us.saturating_add(250),
+        },
+        expected_markout: 0.0,
         expected_slippage_bps: intent.expected_slippage_bps,
         actual_slippage_bps: slip,
         queue_estimate: QueueEstimate::default(),
@@ -327,13 +378,16 @@ fn immediate_exit_fill(intent: &OrderIntent, fill: &FillEvent) -> Option<FillEve
     })
 }
 
-fn expected_real_markout_after_cost(intent: &OrderIntent) -> f64 {
+fn expected_real_markout_after_cost(intent: &OrderIntent, latency_distributions: &LatencyDistributions) -> f64 {
     let expected_bps = (intent.flow.continuation_strength * 5.0 + intent.timing.timing_score * 3.0
         - intent.expected_slippage_bps
         - intent.regime.spread.max(0.0) * 0.25)
         .max(-10.0);
     let notional = intent.request.size * intent.last_price;
-    notional * expected_bps / 10_000.0 - notional * 0.0004
+    let snapshot = latency_distributions.snapshot();
+    let fill_quality = intent.queue_estimate.fill_probability.clamp(0.0, 1.0);
+    let latency_penalty = latency_impact_score(&snapshot, intent.expected_slippage_bps, fill_quality);
+    notional * expected_bps / 10_000.0 - notional * (0.0004 + latency_penalty * 0.00025)
 }
 
 fn execution_threshold(cfg: &Config) -> f64 {
@@ -353,4 +407,22 @@ fn execution_mode_label(mode: ExecutionMode) -> &'static str {
         ExecutionMode::Passive => "passive",
         ExecutionMode::Defensive => "defensive",
     }
+}
+
+fn execution_summary(fill: &FillEvent) -> ExecutionSummary {
+    let ledger_fill = FillLedgerEntry::from(fill);
+    ExecutionSummary {
+        fill_ratio: if fill.size > 0.0 {
+            (fill.filled_size / fill.size).clamp(0.0, 1.0)
+        } else {
+            0.0
+        },
+        slippage: fill.actual_slippage_bps,
+        latency: fill.latency_breakdown,
+        fills: vec![ledger_fill],
+    }
+}
+
+fn new_event_id(prefix: &str) -> String {
+    format!("{prefix}-{}", now_ms())
 }
