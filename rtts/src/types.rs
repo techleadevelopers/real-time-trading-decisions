@@ -1,4 +1,5 @@
 use crate::accounting::{
+    edge_validation::{EdgeRegime, EdgeState},
     latency::LatencyBreakdown,
     ledger::LiquidityFlag,
 };
@@ -352,6 +353,13 @@ pub struct ScoredDecision {
     pub expected_slippage_bps: f64,
     pub data_latency_ms: u64,
     pub adversarial_risk: f64,
+    pub edge_state: EdgeState,
+    pub edge_regime: EdgeRegime,
+    pub edge_reliability_score: f64,
+    pub edge_half_life_samples: f64,
+    pub dynamic_size_multiplier: f64,
+    pub competition_state: CompetitionState,
+    pub competition_score: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -434,9 +442,18 @@ pub enum CompetitionFlag {
     PartialFillToxicity,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CompetitionState {
+    #[default]
+    Normal,
+    Competitive,
+    Saturated,
+}
+
 #[derive(Clone, Debug)]
 pub struct ExecutionEvent {
     pub symbol: String,
+    pub side: Side,
     pub fill_quality: f64,
     pub slippage_real: f64,
     pub adverse_selection_score: f64,
@@ -444,6 +461,10 @@ pub struct ExecutionEvent {
     pub execution_latency_us: u64,
     pub latency_breakdown: LatencyBreakdown,
     pub expected_markout: f64,
+    pub fees_paid: f64,
+    pub rebates_received: f64,
+    pub funding_cost: f64,
+    pub regime: MarketRegime,
     pub competition_flag: CompetitionFlag,
     pub truth: ExecutionTruth,
 }
@@ -485,6 +506,13 @@ pub struct OrderIntent {
     pub context: MarketContext,
     pub flow: FlowState,
     pub timing: MicroTimingState,
+    pub edge_state: EdgeState,
+    pub edge_regime: EdgeRegime,
+    pub edge_reliability_score: f64,
+    pub edge_half_life_samples: f64,
+    pub dynamic_size_multiplier: f64,
+    pub competition_state: CompetitionState,
+    pub competition_score: f64,
     pub execution_mode: ExecutionMode,
     pub queue_estimate: QueueEstimate,
     pub fill_probability: FillProbabilityClass,
@@ -513,10 +541,12 @@ pub struct FillEvent {
     pub expected_markout: f64,
     pub expected_slippage_bps: f64,
     pub actual_slippage_bps: f64,
+    pub competition_flag: CompetitionFlag,
     pub queue_estimate: QueueEstimate,
     pub execution_mode: ExecutionMode,
     pub micro_exit: MicroExitSignal,
     pub markout: MarkoutSnapshot,
+    pub regime: MarketRegime,
     pub complete: bool,
     pub truth: ExecutionTruth,
 }
@@ -530,6 +560,18 @@ pub struct LearningSample {
     pub expected_slippage_bps: f64,
     pub actual_slippage_bps: f64,
     pub pnl: f64,
+    pub expected_markout: f64,
+    pub realized_markout: f64,
+    pub fill_ratio: f64,
+    pub fees_paid: f64,
+    pub rebates_received: f64,
+    pub funding_cost: f64,
+    pub edge_component: f64,
+    pub execution_loss: f64,
+    pub fees_rebates_component: f64,
+    pub adverse_selection_loss: f64,
+    pub edge_capture_ratio: f64,
+    pub competition_state: CompetitionState,
     pub duration_ms: u64,
     pub entry_quality: f64,
     pub markout_100ms: f64,
