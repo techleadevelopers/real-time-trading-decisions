@@ -1,4 +1,5 @@
 use crate::{
+    accounting::edge_validation::{EdgeState, EdgeValidationEngine, EdgeValidationSnapshot},
     config::Config,
     learning::LearningState,
     metrics::Metrics,
@@ -18,8 +19,11 @@ pub async fn run(
     metrics: Arc<Metrics>,
 ) {
     let mut learning = LearningState::default();
+    let mut edge_validation = EdgeValidationEngine::default();
     let mut previous_score = 0.5;
     let mut trading_disabled = false;
+    let mut drawdown_pct = 0.0;
+    let mut cumulative_realized_pnl = 0.0;
 
     loop {
         tokio::select! {
@@ -27,16 +31,29 @@ pub async fn run(
 
             Some(sample) = learning_rx.recv() => {
                 let regime_label = regime_label(&sample.regime);
+                let sample_pnl = sample.pnl;
+                let projected_realized_pnl = cumulative_realized_pnl + sample_pnl;
+                let projected_drawdown_pct =
+                    ((-projected_realized_pnl).max(0.0) / cfg.capital).clamp(0.0, 1.0);
+                let snapshot = edge_validation.observe(&sample, projected_drawdown_pct);
                 learning.apply_sample(sample);
+                cumulative_realized_pnl = projected_realized_pnl;
+                drawdown_pct = projected_drawdown_pct;
                 metrics.hit_rate.with_label_values(&[regime_label]).set(learning.hit_rate());
-                if learning.consecutive_losses() >= cfg.max_consecutive_losses {
+                if learning.consecutive_losses() >= cfg.max_consecutive_losses
+                    || snapshot.edge_state == EdgeState::Invalid
+                    || !snapshot.trading_enabled
+                {
                     trading_disabled = true;
                     metrics.rejected_orders_total.with_label_values(&["adaptive_loss_lockout"]).inc();
+                } else if snapshot.edge_state == EdgeState::Valid {
+                    trading_disabled = false;
                 }
             }
             Some(frame) = rx.recv() => {
                 let started = Instant::now();
-                let decision = score_frame(&cfg, &learning, &frame, previous_score, trading_disabled);
+                let edge_snapshot = edge_validation.snapshot(drawdown_pct);
+                let decision = score_frame(&cfg, &learning, &frame, previous_score, trading_disabled, edge_snapshot);
                 previous_score = decision.score;
                 metrics.decisions_total.with_label_values(&[decision_label(decision.decision)]).inc();
                 metrics.stage_latency_us.with_label_values(&["adaptive_decision"]).observe(started.elapsed().as_micros() as f64);
@@ -59,6 +76,7 @@ fn score_frame(
     frame: &MicrostructureFrame,
     previous_score: f64,
     trading_disabled: bool,
+    edge_snapshot: EdgeValidationSnapshot,
 ) -> ScoredDecision {
     let weights = learning.weights(&frame.regime);
     let direction = infer_direction(frame);
@@ -87,8 +105,29 @@ fn score_frame(
         - flow_penalty(frame.flow.signal)
         - timing_penalty(frame.timing.signal);
     let score = sigmoid(raw).clamp(0.0, 1.0);
-    let confidence = ((score - 0.5).abs() * 2.0 * (1.0 - adversarial_risk)).clamp(0.0, 1.0);
-    let threshold = learning.threshold(&frame.regime);
+    let edge_degrade = match edge_snapshot.edge_state {
+        EdgeState::Valid => 1.0,
+        EdgeState::Uncertain => 0.65,
+        EdgeState::Invalid => 0.0,
+    } * match edge_snapshot.competition_state {
+        crate::types::CompetitionState::Normal => 1.0,
+        crate::types::CompetitionState::Competitive => 0.75,
+        crate::types::CompetitionState::Saturated => 0.0,
+    };
+    let confidence = ((score - 0.5).abs() * 2.0 * (1.0 - adversarial_risk) * edge_degrade)
+        .clamp(0.0, 1.0);
+    let threshold = ((learning.threshold(&frame.regime)
+        + match edge_snapshot.edge_state {
+            EdgeState::Valid => 0.0,
+            EdgeState::Uncertain => 0.05,
+            EdgeState::Invalid => 0.18,
+        })
+        + match edge_snapshot.competition_state {
+            crate::types::CompetitionState::Normal => 0.0,
+            crate::types::CompetitionState::Competitive => 0.05,
+            crate::types::CompetitionState::Saturated => 0.18,
+        })
+        .clamp(0.62, 0.94);
     let data_latency_ms = data_age_ms(frame.timestamp);
     let stale_or_slow = frame.stale || data_latency_ms > cfg.max_data_age_ms;
     let event = event_from_direction(direction, score, threshold);
@@ -101,9 +140,13 @@ fn score_frame(
         expected_duration_ms,
         frame.tape.volume_burst,
         adversarial_risk,
-    );
+    ) * edge_degrade
+        * (1.0 - edge_snapshot.competition_score * 0.35);
 
-    let decision = if trading_disabled {
+    let decision = if trading_disabled
+        || edge_snapshot.edge_state == EdgeState::Invalid
+        || edge_snapshot.competition_state == crate::types::CompetitionState::Saturated
+    {
         Decision::Ignore
     } else if stale_or_slow {
         Decision::Ignore
@@ -147,6 +190,13 @@ fn score_frame(
         expected_slippage_bps,
         data_latency_ms,
         adversarial_risk,
+        edge_state: edge_snapshot.edge_state,
+        edge_regime: edge_snapshot.edge_regime,
+        edge_reliability_score: edge_snapshot.edge_reliability_score,
+        edge_half_life_samples: edge_snapshot.edge_half_life_samples,
+        dynamic_size_multiplier: edge_snapshot.position_size_multiplier,
+        competition_state: edge_snapshot.competition_state,
+        competition_score: edge_snapshot.competition_score,
     }
 }
 
