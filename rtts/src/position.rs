@@ -52,7 +52,9 @@ pub async fn run(
                 accounting.mark_to_market(&cfg.symbol, signal.market.price);
                 sync_position_from_accounting(&mut position, &accounting, &cfg.symbol);
 
-                if let Some(intent) = decide_order(&cfg, &position, &signal, last_score) {
+                let drawdown_pct =
+                    ((-accounting.state().realized_pnl_total).max(0.0) / cfg.capital).clamp(0.0, 1.0);
+                if let Some(intent) = decide_order(&cfg, &position, &signal, last_score, drawdown_pct) {
                     if order_tx.try_send(intent.clone()).is_err() {
                         metrics.channel_backpressure_total.with_label_values(&["position"]).inc();
                         if order_tx.send(intent).await.is_err() {
@@ -77,6 +79,7 @@ fn decide_order(
     position: &Position,
     signal: &ScoredDecision,
     last_score: f64,
+    _drawdown_pct: f64,
 ) -> Option<OrderIntent> {
     if signal.decision == Decision::Exit && position.is_open() {
         let side = position.side()?.opposite();
@@ -103,6 +106,7 @@ fn decide_order(
         Decision::EnterSmall if !position.is_open() && allow_micro_entry(signal) => {
             let size = quote_to_base(
                 cfg.base_order_usd
+                    * signal.dynamic_size_multiplier
                     * 0.35
                     * signal.confidence.max(0.35)
                     * context_size_factor(signal)
@@ -121,7 +125,12 @@ fn decide_order(
             };
             let entry_multiplier =
                 0.55 + position.entries as f64 * 0.22 + signal.confidence * 0.20 + regime_boost;
-            let size = quote_to_base(cfg.base_order_usd * entry_multiplier, signal.market.price);
+            let size = quote_to_base(
+                cfg.base_order_usd
+                    * entry_multiplier
+                    * signal.dynamic_size_multiplier,
+                signal.market.price,
+            );
             Some(intent(cfg, side, size, false, signal, position))
         }
         Decision::Exit if position.is_open() => {
@@ -176,6 +185,17 @@ fn intent(
     } else {
         OrderType::Limit
     };
+    let execution_mode = match signal.competition_state {
+        crate::types::CompetitionState::Normal => {
+            if order_type == OrderType::Market {
+                ExecutionMode::Aggressive
+            } else {
+                ExecutionMode::Passive
+            }
+        }
+        crate::types::CompetitionState::Competitive => ExecutionMode::Passive,
+        crate::types::CompetitionState::Saturated => ExecutionMode::Defensive,
+    };
     OrderIntent {
         request: OrderRequest {
             symbol: cfg.symbol.clone(),
@@ -200,7 +220,14 @@ fn intent(
         context: signal.context.clone(),
         flow: signal.flow,
         timing: signal.timing,
-        execution_mode: ExecutionMode::Passive,
+        edge_state: signal.edge_state,
+        edge_regime: signal.edge_regime,
+        edge_reliability_score: signal.edge_reliability_score,
+        edge_half_life_samples: signal.edge_half_life_samples,
+        dynamic_size_multiplier: signal.dynamic_size_multiplier,
+        competition_state: signal.competition_state,
+        competition_score: signal.competition_score,
+        execution_mode,
         queue_estimate: QueueEstimate::default(),
         fill_probability: FillProbabilityClass::LowFill,
         meta: None,
@@ -241,6 +268,7 @@ fn context_size_factor(signal: &ScoredDecision) -> f64 {
 fn quote_to_base(quote_size: f64, price: f64) -> f64 {
     quote_size / price.max(f64::EPSILON)
 }
+
 
 fn sync_position_from_accounting(
     position: &mut Position,
