@@ -1,4 +1,8 @@
 use crate::{
+    accounting::{
+        latency::{LatencyDistributions, LatencyDistributionSnapshot},
+        quality::{execution_quality_report, EdgeReliabilityModel, ExecutionQualityReport},
+    },
     metrics::Metrics,
     types::{
         CompetitionFlag, Direction, ExecutionEvent, FillEvent, LearningSample, MarketRegime,
@@ -31,6 +35,8 @@ pub async fn run(
     metrics: Arc<Metrics>,
 ) {
     let mut pending: VecDeque<PendingFill> = VecDeque::with_capacity(4096);
+    let mut edge_reliability = EdgeReliabilityModel::default();
+    let mut latency_distributions = LatencyDistributions::default();
     loop {
         tokio::select! {
             Some(fill) = fill_rx.recv() => {
@@ -49,7 +55,15 @@ pub async fn run(
             }
             Some(update) = market_rx.recv() => {
                 if let Some((ts, price)) = market_price(update) {
-                    update_pending(&mut pending, ts, price, &learning_tx, &metrics);
+                    update_pending(
+                        &mut pending,
+                        ts,
+                        price,
+                        &learning_tx,
+                        &metrics,
+                        &mut edge_reliability,
+                        &mut latency_distributions,
+                    );
                 }
             }
             else => break,
@@ -63,6 +77,8 @@ fn update_pending(
     market_price: f64,
     learning_tx: &Sender<LearningSample>,
     metrics: &Metrics,
+    edge_reliability: &mut EdgeReliabilityModel,
+    latency_distributions: &mut LatencyDistributions,
 ) {
     for item in pending.iter_mut() {
         let elapsed = market_ts.saturating_sub(item.created_at);
@@ -85,6 +101,15 @@ fn update_pending(
     }) {
         if let Some(item) = pending.pop_front() {
             let event = finalized_event(item);
+            latency_distributions.record(event.latency_breakdown);
+            let decision_quality = edge_reliability.observe(
+                event.expected_markout,
+                event.markout_curve.pnl_500ms,
+            );
+            let execution_quality = build_execution_quality_report(
+                &event,
+                latency_distributions.snapshot(),
+            );
             let sample = learning_sample_from_event(&event);
             metrics
                 .microtrade_pnl
@@ -97,6 +122,8 @@ fn update_pending(
                 slippage_real = event.slippage_real,
                 adverse_selection_score = event.adverse_selection_score,
                 latency_us = event.execution_latency_us,
+                edge_reliability = decision_quality.edge_reliability_score,
+                fill_rate = execution_quality.fill_rate,
                 ?event.competition_flag,
                 "execution truth event"
             );
@@ -121,6 +148,8 @@ fn finalized_event(item: PendingFill) -> ExecutionEvent {
         adverse_selection_score: adverse,
         markout_curve: markout,
         execution_latency_us: fill.latency_us,
+        latency_breakdown: fill.latency_breakdown,
+        expected_markout: fill.expected_markout,
         competition_flag: competition_flag(&fill, &markout),
         truth: fill.truth,
     }
@@ -171,7 +200,10 @@ fn markout_pnl(fill: &FillEvent, future_price: f64) -> f64 {
         Side::Buy => 1.0,
         Side::Sell => -1.0,
     };
-    (future_price - fill.price) * fill.filled_size * side - fill.fee
+    (future_price - fill.price) * fill.filled_size * side
+        - fill.fee
+        + fill.rebate_amount
+        - fill.funding_amount
 }
 
 fn adverse_selection_score(markout: &MarkoutSnapshot) -> f64 {
@@ -206,4 +238,20 @@ fn emit_structural_event(fill: &FillEvent) {
         simulated = true,
         "structural paper fill ignored by execution learning"
     );
+}
+
+fn build_execution_quality_report(
+    event: &ExecutionEvent,
+    latency_distribution: LatencyDistributionSnapshot,
+) -> ExecutionQualityReport {
+    execution_quality_report(
+        event.truth.partial_fill_ratio.clamp(0.0, 1.0),
+        event.slippage_real,
+        if matches!(event.competition_flag, CompetitionFlag::RepeatedOutbid) {
+            1.0
+        } else {
+            0.0
+        },
+        latency_distribution,
+    )
 }
