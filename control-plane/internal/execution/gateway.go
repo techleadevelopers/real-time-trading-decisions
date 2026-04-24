@@ -15,7 +15,15 @@ import (
 )
 
 type ExchangeClient interface {
-	SendOrder(context.Context, domain.Order) (domain.Order, error)
+	SendOrder(context.Context, domain.Order) ([]ExchangeStep, error)
+}
+
+type ExchangeStep struct {
+	Status       domain.OrderStatus
+	OccurredAt   time.Time
+	CancelReason string
+	Ledger       *domain.FillLedgerEntry
+	Execution    *domain.ExecutionEvent
 }
 
 type Gateway struct {
@@ -56,7 +64,12 @@ func (g *Gateway) Submit(ctx context.Context, req domain.ExecutionRequest) (doma
 	if err != nil && !errors.Is(err, state.ErrDuplicate) {
 		return domain.Order{}, err
 	}
-	sent, err := g.exchange.SendOrder(ctx, reserved)
+	sentOrder, err := g.store.MarkOrderSent(reserved.ID, time.Now().UTC())
+	if err == nil {
+		g.emit("order_update", sentOrder)
+		reserved = sentOrder
+	}
+	steps, err := g.exchange.SendOrder(ctx, reserved)
 	if err != nil {
 		g.risk.ObserveExecution(time.Since(started), true)
 		reserved.Status = domain.OrderRejected
@@ -66,8 +79,48 @@ func (g *Gateway) Submit(ctx context.Context, req domain.ExecutionRequest) (doma
 		return reserved, err
 	}
 	g.risk.ObserveExecution(time.Since(started), false)
-	g.emit("order_update", sent)
-	return sent, nil
+	finalOrder := reserved
+	for _, step := range steps {
+		switch step.Status {
+		case domain.OrderAck:
+			if updated, ackErr := g.store.MarkOrderAck(reserved.ID, step.OccurredAt); ackErr == nil {
+				finalOrder = updated
+				g.emit("order_update", updated)
+			}
+		case domain.OrderPartial, domain.OrderFilled:
+			if step.Ledger == nil || step.Execution == nil {
+				continue
+			}
+			updated, position, applyErr := g.store.ApplyExternalFill(reserved.ID, *step.Ledger, *step.Execution)
+			if applyErr != nil {
+				return finalOrder, applyErr
+			}
+			finalOrder = updated
+			g.risk.ObserveExecutionEvent(*step.Execution)
+			g.emit("fill_ledger_entry", step.Ledger)
+			g.emit("execution_event", step.Execution)
+			g.emit("execution_update", domain.ExecutionUpdate{
+				Order:                updated,
+				Ledger:               step.Ledger,
+				Execution:            step.Execution,
+				Position:             &position,
+				RequestTimestampMs:   updated.RequestAt.UnixMilli(),
+				SendTimestampMs:      updated.SendAt.UnixMilli(),
+				AckTimestampMs:       updated.AckAt.UnixMilli(),
+				FirstFillTimestampMs: updated.FirstFillAt.UnixMilli(),
+				LastFillTimestampMs:  updated.LastFillAt.UnixMilli(),
+				ExpectedRealizedMarkout: req.ExpectedRealizedMarkout,
+			})
+			g.emit("position_update", position)
+			g.emit("order_update", updated)
+		case domain.OrderCanceled:
+			if updated, cancelErr := g.store.CancelOrder(reserved.ID, step.CancelReason, step.OccurredAt); cancelErr == nil {
+				finalOrder = updated
+				g.emit("order_update", updated)
+			}
+		}
+	}
+	return finalOrder, nil
 }
 
 func (g *Gateway) emit(kind string, value any) {
