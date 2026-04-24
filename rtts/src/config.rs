@@ -40,6 +40,10 @@ pub struct Config {
     pub window_ms: u64,
     #[arg(long, env = "RTTS_METRICS_ADDR", default_value = "127.0.0.1:9898")]
     pub metrics_addr: String,
+    #[arg(long, env = "RTTS_CONTROL_PLANE_HTTP", default_value = "http://127.0.0.1:8088")]
+    pub control_plane_http: String,
+    #[arg(long, env = "RTTS_CONTROL_PLANE_WS", default_value = "ws://127.0.0.1:8088/ws")]
+    pub control_plane_ws: String,
 }
 
 impl Config {
