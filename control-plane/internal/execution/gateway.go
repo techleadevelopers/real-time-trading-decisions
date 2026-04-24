@@ -110,6 +110,10 @@ func (g *Gateway) Submit(ctx context.Context, req domain.ExecutionRequest) (doma
 				FirstFillTimestampMs: updated.FirstFillAt.UnixMilli(),
 				LastFillTimestampMs:  updated.LastFillAt.UnixMilli(),
 				ExpectedRealizedMarkout: req.ExpectedRealizedMarkout,
+				RegimeKind:           req.RegimeKind,
+				RegimeVolatility:     req.RegimeVolatility,
+				RegimeSpread:         req.RegimeSpread,
+				RegimeTrendStrength:  req.RegimeTrendStrength,
 			})
 			g.emit("position_update", position)
 			g.emit("order_update", updated)
