@@ -50,6 +50,10 @@ type ExecutionRequest struct {
 	RequestTime             time.Time     `json:"request_timestamp,omitempty"`
 	SendTime                time.Time     `json:"send_timestamp,omitempty"`
 	ExpectedRealizedMarkout float64       `json:"expected_realized_markout,omitempty"`
+	RegimeKind              string        `json:"regime_kind,omitempty"`
+	RegimeVolatility        float64       `json:"regime_volatility,omitempty"`
+	RegimeSpread            float64       `json:"regime_spread,omitempty"`
+	RegimeTrendStrength     float64       `json:"regime_trend_strength,omitempty"`
 }
 
 type OrderStatus string
@@ -163,6 +167,10 @@ type ExecutionUpdate struct {
 	FirstFillTimestampMs int64          `json:"first_fill_timestamp_ms"`
 	LastFillTimestampMs  int64          `json:"last_fill_timestamp_ms"`
 	ExpectedRealizedMarkout float64     `json:"expected_realized_markout,omitempty"`
+	RegimeKind            string        `json:"regime_kind,omitempty"`
+	RegimeVolatility      float64       `json:"regime_volatility,omitempty"`
+	RegimeSpread          float64       `json:"regime_spread,omitempty"`
+	RegimeTrendStrength   float64       `json:"regime_trend_strength,omitempty"`
 }
 
 type ReconciliationStatus struct {
