@@ -8,6 +8,7 @@ pub mod decision;
 pub mod entry_quality;
 pub mod ev_calculator;
 pub mod event_engine;
+pub mod execution_external;
 pub mod execution;
 pub mod execution_mode;
 pub mod execution_smart;
