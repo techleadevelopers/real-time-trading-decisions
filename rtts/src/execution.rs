@@ -5,8 +5,8 @@ use crate::{
     },
     metrics::Metrics,
     types::{
-        ExecutionMode, ExecutionTruth, FillEvent, MarkoutSnapshot, MicroExitSignal, OrderIntent,
-        QueueEstimate, Side,
+        CompetitionFlag, ExecutionMode, ExecutionTruth, FillEvent, MarkoutSnapshot,
+        MicroExitSignal, OrderIntent, QueueEstimate, Side,
     },
 };
 use std::{
@@ -91,10 +91,12 @@ async fn paper_submit(intent: &OrderIntent) -> Result<FillEvent, ()> {
         expected_markout: 0.0,
         expected_slippage_bps: intent.expected_slippage_bps,
         actual_slippage_bps: slip_bps.abs(),
+        competition_flag: CompetitionFlag::None,
         queue_estimate: QueueEstimate::default(),
         execution_mode: ExecutionMode::Aggressive,
         micro_exit: MicroExitSignal::default(),
         markout: MarkoutSnapshot::default(),
+        regime: intent.regime.clone(),
         complete: true,
         truth: ExecutionTruth {
             request_timestamp: intent.timestamp,
