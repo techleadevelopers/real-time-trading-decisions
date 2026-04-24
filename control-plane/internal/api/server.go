@@ -34,6 +34,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /status", s.status)
 	mux.HandleFunc("GET /positions", s.positions)
 	mux.HandleFunc("GET /risk", s.riskStatus)
+	mux.HandleFunc("GET /execution/ledger", s.executionLedger)
+	mux.HandleFunc("GET /execution/events", s.executionEvents)
+	mux.HandleFunc("GET /execution/reconciliation", s.executionReconciliation)
 	mux.HandleFunc("POST /risk/execution-events", s.executionEvent)
 	mux.HandleFunc("POST /kill-switch", s.killSwitch)
 	mux.HandleFunc("POST /execution/requests", s.executionRequest)
@@ -60,6 +63,18 @@ func (s *Server) positions(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) riskStatus(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.risk.Status())
+}
+
+func (s *Server) executionLedger(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.store.Ledger())
+}
+
+func (s *Server) executionEvents(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.store.ExecutionEvents())
+}
+
+func (s *Server) executionReconciliation(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.store.Reconciliation())
 }
 
 func (s *Server) executionEvent(w http.ResponseWriter, r *http.Request) {
