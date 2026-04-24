@@ -1,3 +1,4 @@
+pub mod accounting;
 pub mod adaptive_engine;
 pub mod adverse_selection;
 pub mod competition_model;
