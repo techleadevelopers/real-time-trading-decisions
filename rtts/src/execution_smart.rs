@@ -28,6 +28,10 @@ struct ControlPlaneExecutionRequest {
     reduce_only: bool,
     request_timestamp: String,
     expected_realized_markout: f64,
+    regime_kind: String,
+    regime_volatility: f64,
+    regime_spread: f64,
+    regime_trend_strength: f64,
 }
 
 pub async fn run(
@@ -94,6 +98,10 @@ pub async fn run(
             reduce_only: intent.request.reduce_only,
             request_timestamp: iso8601_utc(now_ms()),
             expected_realized_markout,
+            regime_kind: format!("{:?}", intent.context.regime),
+            regime_volatility: intent.regime.volatility,
+            regime_spread: intent.regime.spread,
+            regime_trend_strength: intent.regime.trend_strength,
         };
         let side_label = match intent.request.side {
             Side::Buy => "buy",
