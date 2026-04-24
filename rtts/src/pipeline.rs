@@ -1,5 +1,5 @@
 use crate::{
-    adaptive_engine, config::Config, execution_smart, execution_truth, ingestion, meta_engine,
+    adaptive_engine, config::Config, execution_external, execution_smart, execution_truth, ingestion, meta_engine,
     metrics::Metrics, microstructure, position, risk, types::MarketUpdate,
 };
 use anyhow::{Context, Result};
@@ -64,6 +64,10 @@ pub async fn run(cfg: Config, metrics: Arc<Metrics>) -> Result<()> {
     tokio::spawn(execution_smart::run(
         cfg.clone(),
         meta_rx,
+        metrics.clone(),
+    ));
+    tokio::spawn(execution_external::run(
+        cfg.clone(),
         fill_tx,
         truth_fill_tx,
         metrics.clone(),
