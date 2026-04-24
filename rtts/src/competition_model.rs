@@ -17,6 +17,18 @@ pub fn score(intent: &OrderIntent) -> f64 {
         RegimeKind::LowLiquidity => 0.18,
         RegimeKind::Normal => 0.0,
     };
-    (urgency_crowding + short_duration + spread_signal + latency + taker_penalty + regime_pressure)
+    let observed_competition = match intent.competition_state {
+        crate::types::CompetitionState::Normal => 0.0,
+        crate::types::CompetitionState::Competitive => 0.18,
+        crate::types::CompetitionState::Saturated => 0.40,
+    };
+    (urgency_crowding
+        + short_duration
+        + spread_signal
+        + latency
+        + taker_penalty
+        + regime_pressure
+        + observed_competition
+        + intent.competition_score * 0.35)
         .clamp(0.0, 1.0)
 }
