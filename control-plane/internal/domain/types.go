@@ -57,10 +57,18 @@ type OrderStatus string
 const (
 	OrderNew      OrderStatus = "NEW"
 	OrderSent     OrderStatus = "SENT"
+	OrderAck      OrderStatus = "ACK"
 	OrderPartial  OrderStatus = "PARTIAL"
 	OrderFilled   OrderStatus = "FILLED"
 	OrderCanceled OrderStatus = "CANCELED"
 	OrderRejected OrderStatus = "REJECTED"
+)
+
+type LiquidityFlag string
+
+const (
+	LiquidityMaker LiquidityFlag = "MAKER"
+	LiquidityTaker LiquidityFlag = "TAKER"
 )
 
 type Order struct {
@@ -89,6 +97,30 @@ type Order struct {
 	RejectReason         string        `json:"reject_reason,omitempty"`
 }
 
+type FillLedgerEntry struct {
+	OrderID        string        `json:"order_id"`
+	FillID         string        `json:"fill_id"`
+	Symbol         string        `json:"symbol"`
+	Side           Side          `json:"side"`
+	Price          float64       `json:"price"`
+	Quantity       float64       `json:"quantity"`
+	LiquidityFlag  LiquidityFlag `json:"liquidity_flag"`
+	FeeAmount      float64       `json:"fee_amount"`
+	FeeAsset       string        `json:"fee_asset"`
+	RebateAmount   float64       `json:"rebate_amount"`
+	FundingAmount  float64       `json:"funding_amount"`
+	EventTime      time.Time     `json:"event_time"`
+	EventTimeUnixMs int64        `json:"event_time_unix_ms"`
+}
+
+type LatencyBreakdown struct {
+	DecisionLatency  time.Duration `json:"decision_latency"`
+	SendLatency      time.Duration `json:"send_latency"`
+	AckLatency       time.Duration `json:"ack_latency"`
+	FirstFillLatency time.Duration `json:"first_fill_latency"`
+	FullFillLatency  time.Duration `json:"full_fill_latency"`
+}
+
 type MarkoutCurve struct {
 	PnL100ms float64 `json:"markout_100ms"`
 	PnL500ms float64 `json:"markout_500ms"`
@@ -98,17 +130,48 @@ type MarkoutCurve struct {
 
 type ExecutionEvent struct {
 	OrderID                 string        `json:"order_id"`
+	FillID                  string        `json:"fill_id,omitempty"`
 	Symbol                  string        `json:"symbol"`
+	Status                  OrderStatus   `json:"status"`
+	FilledQuantity          float64       `json:"filled_quantity,omitempty"`
+	FillPrice               float64       `json:"fill_price,omitempty"`
+	LiquidityFlag           LiquidityFlag `json:"liquidity_flag,omitempty"`
+	FeeAmount               float64       `json:"fee_amount,omitempty"`
+	RebateAmount            float64       `json:"rebate_amount,omitempty"`
+	FundingAmount           float64       `json:"funding_amount,omitempty"`
 	FillQuality             float64       `json:"fill_quality"`
 	SlippageReal            float64       `json:"slippage_real"`
 	AdverseSelectionScore   float64       `json:"adverse_selection_score"`
 	MarkoutCurve            MarkoutCurve  `json:"markout_curve"`
 	ExecutionLatency        time.Duration `json:"execution_latency"`
+	LatencyBreakdown        LatencyBreakdown `json:"latency_breakdown"`
 	CompetitionFlag         string        `json:"competition_flag"`
 	Simulated               bool          `json:"simulated"`
 	PartialFillRatio        float64       `json:"partial_fill_ratio"`
 	ExpectedRealizedMarkout float64       `json:"expected_realized_markout,omitempty"`
 	RealizedPnL             float64       `json:"realized_pnl,omitempty"`
+}
+
+type ExecutionUpdate struct {
+	Order              Order            `json:"order"`
+	Ledger             *FillLedgerEntry `json:"ledger,omitempty"`
+	Execution          *ExecutionEvent  `json:"execution,omitempty"`
+	Position           *Position        `json:"position,omitempty"`
+	RequestTimestampMs int64            `json:"request_timestamp_ms"`
+	SendTimestampMs    int64            `json:"send_timestamp_ms"`
+	AckTimestampMs     int64            `json:"ack_timestamp_ms"`
+	FirstFillTimestampMs int64          `json:"first_fill_timestamp_ms"`
+	LastFillTimestampMs  int64          `json:"last_fill_timestamp_ms"`
+	ExpectedRealizedMarkout float64     `json:"expected_realized_markout,omitempty"`
+}
+
+type ReconciliationStatus struct {
+	OrdersTracked          int                `json:"orders_tracked"`
+	LedgerEntries          int                `json:"ledger_entries"`
+	ExecutionEvents        int                `json:"execution_events"`
+	ExchangeFillQtyByOrder map[string]float64 `json:"exchange_fill_qty_by_order"`
+	LedgerQtyByOrder       map[string]float64 `json:"ledger_qty_by_order"`
+	Matched                bool               `json:"matched"`
 }
 
 type Position struct {
