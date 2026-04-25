@@ -360,6 +360,7 @@ pub struct ScoredDecision {
     pub dynamic_size_multiplier: f64,
     pub competition_state: CompetitionState,
     pub competition_score: f64,
+    pub fill_probability: FillProbabilityClass,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
