@@ -39,6 +39,9 @@ pub struct EdgeValidationSnapshot {
     pub edge_error_skew: f64,
     pub edge_capture_mean: f64,
     pub edge_capture_variance: f64,
+    pub negative_capture_streak: usize,
+    pub execution_alpha_mean: f64,
+    pub execution_alpha_variance: f64,
     pub confidence_interval_low: f64,
     pub confidence_interval_high: f64,
     pub competition_score: f64,
@@ -92,6 +95,7 @@ pub struct EdgeValidationEngine {
     adjusted_returns: VecDeque<f64>,
     edge_errors: VecDeque<f64>,
     capture_ratios: VecDeque<f64>,
+    execution_alphas: VecDeque<f64>,
     fill_rates: VecDeque<f64>,
     slippages: VecDeque<f64>,
     outbid_flags: VecDeque<f64>,
@@ -123,6 +127,7 @@ impl EdgeValidationEngine {
             adjusted_returns: VecDeque::with_capacity(capacity),
             edge_errors: VecDeque::with_capacity(capacity),
             capture_ratios: VecDeque::with_capacity(capacity),
+            execution_alphas: VecDeque::with_capacity(capacity),
             fill_rates: VecDeque::with_capacity(capacity),
             slippages: VecDeque::with_capacity(capacity),
             outbid_flags: VecDeque::with_capacity(capacity),
@@ -169,6 +174,11 @@ impl EdgeValidationEngine {
         push_capped(&mut self.adjusted_returns, adjusted_return, self.capacity);
         push_capped(&mut self.edge_errors, edge_error, self.capacity);
         push_capped(&mut self.capture_ratios, capture_ratio, self.capacity);
+        push_capped(
+            &mut self.execution_alphas,
+            filter_noise(sample.execution_alpha),
+            self.capacity,
+        );
         push_capped(&mut self.fill_rates, sample.fill_ratio.clamp(0.0, 1.0), self.capacity);
         push_capped(
             &mut self.slippages,
@@ -218,6 +228,7 @@ impl EdgeValidationEngine {
 
         let moments = rolling_moments(&self.edge_errors);
         let capture_moments = rolling_moments(&self.capture_ratios);
+        let execution_alpha_moments = rolling_moments(&self.execution_alphas);
         let sharpe_like = rolling_sharpe_like(&self.adjusted_returns);
         let t_statistic = one_sample_t_statistic(&self.realized_pnls);
         let (confidence_interval_low, confidence_interval_high) =
@@ -236,7 +247,7 @@ impl EdgeValidationEngine {
             moments.variance,
             moments.skew,
             sharpe_like,
-            capture_moments.mean,
+            capture_moments.mean + execution_alpha_moments.mean.signum() * execution_alpha_moments.mean.abs().min(1.0) * 0.15,
             competition_score,
             self.failure_ema,
         );
@@ -291,6 +302,9 @@ impl EdgeValidationEngine {
             edge_error_skew: moments.skew,
             edge_capture_mean: capture_moments.mean,
             edge_capture_variance: capture_moments.variance,
+            negative_capture_streak: self.negative_capture_streak,
+            execution_alpha_mean: execution_alpha_moments.mean,
+            execution_alpha_variance: execution_alpha_moments.variance,
             confidence_interval_low,
             confidence_interval_high,
             competition_score,
@@ -310,6 +324,7 @@ impl EdgeValidationEngine {
     pub fn snapshot(&self, drawdown_pct: f64) -> EdgeValidationSnapshot {
         let moments = rolling_moments(&self.edge_errors);
         let capture_moments = rolling_moments(&self.capture_ratios);
+        let execution_alpha_moments = rolling_moments(&self.execution_alphas);
         let sharpe_like = rolling_sharpe_like(&self.adjusted_returns);
         let t_statistic = one_sample_t_statistic(&self.realized_pnls);
         let (confidence_interval_low, confidence_interval_high) =
@@ -328,7 +343,7 @@ impl EdgeValidationEngine {
             moments.variance,
             moments.skew,
             sharpe_like,
-            capture_moments.mean,
+            capture_moments.mean + execution_alpha_moments.mean.signum() * execution_alpha_moments.mean.abs().min(1.0) * 0.15,
             competition_score,
             self.failure_ema,
         );
@@ -374,6 +389,9 @@ impl EdgeValidationEngine {
             edge_error_skew: moments.skew,
             edge_capture_mean: capture_moments.mean,
             edge_capture_variance: capture_moments.variance,
+            negative_capture_streak: self.negative_capture_streak,
+            execution_alpha_mean: execution_alpha_moments.mean,
+            execution_alpha_variance: execution_alpha_moments.variance,
             confidence_interval_low,
             confidence_interval_high,
             competition_score,
@@ -755,6 +773,7 @@ mod tests {
             pnl,
             expected_markout,
             realized_markout,
+            execution_alpha: pnl - expected_markout,
             fill_ratio,
             fees_paid: 0.1,
             rebates_received: 0.0,
