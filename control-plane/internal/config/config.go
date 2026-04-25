@@ -18,6 +18,7 @@ type Config struct {
 	UpdateBuffer          int
 	WebSocketWriteTimeout time.Duration
 	Log                   string
+	BingX                 BingXConfig
 }
 
 type HTTPConfig struct {
@@ -46,6 +47,14 @@ type ExecutionConfig struct {
 	IdempotencyTTL time.Duration
 }
 
+type BingXConfig struct {
+	APIKey string
+	SecretKey string
+	BaseURL string
+	WSURL string
+	Enabled bool
+}
+
 func Load() Config {
 	return Config{
 		HTTP: HTTPConfig{Addr: env("CONTROL_PLANE_ADDR", ":8088")},
@@ -63,6 +72,13 @@ func Load() Config {
 			LatencyRejectAfter: durationEnv("RISK_LATENCY_REJECT_AFTER", 150*time.Millisecond),
 		},
 		Execution:             ExecutionConfig{IdempotencyTTL: durationEnv("EXEC_IDEMPOTENCY_TTL", 24*time.Hour)},
+		BingX: BingXConfig{
+			APIKey: env("BINGX_API_KEY", ""),
+			SecretKey: env("BINGX_SECRET_KEY", ""),
+			BaseURL: env("BINGX_BASE_URL", "https://open-api.bingx.com"),
+			WSURL: env("BINGX_WS_URL", "wss://open-api-swap.bingx.com"),
+			Enabled: strings.EqualFold(env("EXECUTION_EXCHANGE", "paper"), "bingx"),
+		},
 		MarketDataBuffer:      intEnv("MD_BUFFER", 8192),
 		UpdateBuffer:          intEnv("UPDATE_BUFFER", 8192),
 		WebSocketWriteTimeout: durationEnv("WS_WRITE_TIMEOUT", 2*time.Second),
