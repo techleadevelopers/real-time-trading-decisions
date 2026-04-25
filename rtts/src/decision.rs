@@ -90,6 +90,7 @@ pub async fn run(
             ),
             competition_state: CompetitionState::Normal,
             competition_score: 0.0,
+            fill_probability: crate::types::FillProbabilityClass::LowFill,
         };
         if tx.try_send(output.clone()).is_err() {
             metrics
