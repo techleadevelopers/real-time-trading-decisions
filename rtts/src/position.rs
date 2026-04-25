@@ -81,6 +81,11 @@ fn decide_order(
     last_score: f64,
     _drawdown_pct: f64,
 ) -> Option<OrderIntent> {
+    if should_force_execution_exit(position, signal) {
+        let side = position.side()?.opposite();
+        return Some(intent(cfg, side, position.size.abs(), true, signal, position));
+    }
+
     if signal.decision == Decision::Exit && position.is_open() {
         let side = position.side()?.opposite();
         let reduce_size = if signal.adversarial_risk > 0.80 {
@@ -224,9 +229,14 @@ fn intent(
         edge_regime: signal.edge_regime,
         edge_reliability_score: signal.edge_reliability_score,
         edge_half_life_samples: signal.edge_half_life_samples,
+        edge_capture_mean: signal.edge_capture_mean,
+        negative_capture_streak: signal.negative_capture_streak,
+        execution_alpha_mean: signal.execution_alpha_mean,
+        markout_degradation_score: signal.markout_degradation_score,
         dynamic_size_multiplier: signal.dynamic_size_multiplier,
         competition_state: signal.competition_state,
         competition_score: signal.competition_score,
+        trading_enabled: signal.trading_enabled,
         execution_mode,
         queue_estimate: QueueEstimate::default(),
         fill_probability: signal.fill_probability,
@@ -235,6 +245,9 @@ fn intent(
 }
 
 fn allow_micro_entry(signal: &ScoredDecision) -> bool {
+    signal.trading_enabled
+        && signal.edge_state != crate::accounting::edge_validation::EdgeState::Invalid
+        &&
     matches!(
         signal.flow.signal,
         FlowSignal::StrongContinuation | FlowSignal::WeakContinuation
@@ -243,6 +256,16 @@ fn allow_micro_entry(signal: &ScoredDecision) -> bool {
         TimingSignal::Optimal | TimingSignal::Neutral
     ) && signal.flow.continuation_strength > 0.42
         && signal.timing.timing_score > 0.45
+}
+
+fn should_force_execution_exit(position: &Position, signal: &ScoredDecision) -> bool {
+    position.is_open()
+        && (!signal.trading_enabled
+            || signal.competition_state == crate::types::CompetitionState::Saturated
+            || signal.negative_capture_streak >= 4
+            || signal.edge_capture_mean < -0.05
+            || signal.execution_alpha_mean < -1.0
+            || signal.markout_degradation_score > 0.85)
 }
 
 fn flow_size_factor(signal: &ScoredDecision) -> f64 {
