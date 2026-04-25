@@ -1,6 +1,7 @@
 use crate::{
     accounting::edge_validation::{EdgeState, EdgeValidationEngine, EdgeValidationSnapshot},
     config::Config,
+    execution_controller::ExecutionControlFeedback,
     learning::LearningState,
     metrics::Metrics,
     types::{
@@ -15,6 +16,7 @@ pub async fn run(
     cfg: Config,
     mut rx: Receiver<MicrostructureFrame>,
     mut learning_rx: Receiver<LearningSample>,
+    mut control_feedback_rx: Receiver<ExecutionControlFeedback>,
     tx: Sender<ScoredDecision>,
     metrics: Arc<Metrics>,
 ) {
@@ -48,6 +50,16 @@ pub async fn run(
                     metrics.rejected_orders_total.with_label_values(&["adaptive_loss_lockout"]).inc();
                 } else if snapshot.edge_state == EdgeState::Valid {
                     trading_disabled = false;
+                }
+            }
+            Some(feedback) = control_feedback_rx.recv() => {
+                edge_validation.observe_failure(feedback.reason);
+                metrics
+                    .rejected_orders_total
+                    .with_label_values(&["execution_controller_failure"])
+                    .inc();
+                if feedback.aborted_due_to_decay {
+                    trading_disabled = true;
                 }
             }
             Some(frame) = rx.recv() => {
@@ -197,6 +209,7 @@ fn score_frame(
         dynamic_size_multiplier: edge_snapshot.position_size_multiplier,
         competition_state: edge_snapshot.competition_state,
         competition_score: edge_snapshot.competition_score,
+        fill_probability: crate::types::FillProbabilityClass::LowFill,
     }
 }
 
