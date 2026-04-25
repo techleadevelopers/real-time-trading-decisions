@@ -1,6 +1,7 @@
 use crate::{
     accounting::edge_validation::EdgeState,
     config::Config,
+    execution::queue_engine::{QueueEngine, QueueState},
     metrics::Metrics,
     types::{
         CompetitionFlag, CompetitionState, ExecutionMode, FillProbabilityClass, MarketUpdate,
@@ -28,19 +29,6 @@ impl From<ExecutionMode> for ExecutionStrategy {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct QueueState {
-    pub queue_position: f64,
-    pub volume_ahead: f64,
-    pub fill_probability: f64,
-    pub competition_state: CompetitionState,
-    pub best_bid: f64,
-    pub best_ask: f64,
-    pub last_reference_price: f64,
-    pub liquidity_pull_score: f64,
-    pub outbid_count: u32,
-}
-
-#[derive(Clone, Debug, Default)]
 pub struct FillProgress {
     pub filled_qty: f64,
     pub remaining_qty: f64,
@@ -50,11 +38,23 @@ pub struct FillProgress {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ExecutionAction {
-    Hold,
+    HoldPassive,
+    StepAhead { new_price: f64 },
+    CrossSpread,
     Cancel,
     Replace { new_price: f64 },
     SwitchStrategy { new_strategy: ExecutionStrategy },
+    ExitPosition { price: Option<f64> },
     Abort,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct OrderExecutionState {
+    pub time_in_book_ms: u64,
+    pub times_outbid: u32,
+    pub cancel_replace_count: u32,
+    pub fill_progress: f64,
+    pub queue_position_history: Vec<f64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -129,6 +129,14 @@ pub enum ExecutionInstruction {
         price: Option<f64>,
         reason: &'static str,
     },
+    ExitPosition {
+        order_id: String,
+        symbol: String,
+        side: Side,
+        size: f64,
+        price: Option<f64>,
+        reason: &'static str,
+    },
     Abort { order_id: String, symbol: String, reason: &'static str },
 }
 
@@ -141,12 +149,14 @@ pub struct ExecutionController {
     pub current_strategy: ExecutionStrategy,
     pub queue_state: QueueState,
     pub fill_state: FillProgress,
+    pub order_state: OrderExecutionState,
     pub start_ts: u64,
     pub last_update_ts: u64,
     pub expected_fill_time_ms: f64,
     pub edge_half_life_ms: f64,
     pub cancel_count: u32,
     pub replace_count: u32,
+    queue_engine: QueueEngine,
     idempotency_key: String,
     current_price: Option<f64>,
     status: OrderLifecycleState,
@@ -159,6 +169,13 @@ pub struct ExecutionController {
     max_replace_per_order: u32,
     queue_replace_volume_factor: f64,
     min_fill_probability: f64,
+    negative_capture_streak: usize,
+    execution_alpha_mean: f64,
+    validation_approved: bool,
+    recent_adverse_selection: f64,
+    recent_markout_degradation: f64,
+    recent_capture_ratio: f64,
+    recent_partial_fill_ratio: f64,
 }
 
 impl ExecutionController {
@@ -167,35 +184,32 @@ impl ExecutionController {
         let expected_fill_time_ms = expected_fill_time_ms(intent);
         let edge_half_life_ms = edge_half_life_ms(intent);
         let initial_volume_ahead = intent.queue_estimate.volume_ahead.max(intent.request.size);
+        let queue_engine =
+            QueueEngine::new(intent.queue_estimate, intent.request.size, intent.expected_duration_ms);
+        let mut queue_state = queue_engine.state();
+        queue_state.volume_ahead = initial_volume_ahead;
+        queue_state.expected_fill_time_ms = expected_fill_time_ms;
         Self {
             order_id: idempotency_key.clone(),
             symbol: intent.request.symbol.clone(),
             side: intent.request.side,
             initial_decision: scored_decision_from_intent(intent),
             current_strategy: ExecutionStrategy::from(intent.execution_mode),
-            queue_state: QueueState {
-                queue_position: intent.queue_estimate.queue_position,
-                volume_ahead: initial_volume_ahead,
-                fill_probability: queue_fill_probability(intent.queue_estimate),
-                competition_state: intent.competition_state,
-                best_bid: 0.0,
-                best_ask: 0.0,
-                last_reference_price: intent.request.price.unwrap_or(intent.last_price),
-                liquidity_pull_score: 0.0,
-                outbid_count: 0,
-            },
+            queue_state,
             fill_state: FillProgress {
                 filled_qty: 0.0,
                 remaining_qty: intent.request.size,
                 fill_rate: 0.0,
                 last_fill_ts: None,
             },
+            order_state: OrderExecutionState::default(),
             start_ts: intent.timestamp,
             last_update_ts: intent.timestamp,
             expected_fill_time_ms,
             edge_half_life_ms,
             cancel_count: 0,
             replace_count: 0,
+            queue_engine,
             idempotency_key,
             current_price: intent.request.price,
             status: OrderLifecycleState::New,
@@ -208,6 +222,13 @@ impl ExecutionController {
             max_replace_per_order: cfg.max_replace_per_order,
             queue_replace_volume_factor: cfg.queue_replace_volume_factor.max(1.05),
             min_fill_probability: cfg.min_fill_probability.clamp(0.05, 0.95),
+            negative_capture_streak: intent.negative_capture_streak,
+            execution_alpha_mean: intent.execution_alpha_mean,
+            validation_approved: intent.trading_enabled && intent.edge_state != EdgeState::Invalid,
+            recent_adverse_selection: 0.0,
+            recent_markout_degradation: intent.markout_degradation_score,
+            recent_capture_ratio: intent.edge_capture_mean,
+            recent_partial_fill_ratio: 0.0,
         }
     }
 
@@ -229,9 +250,7 @@ impl ExecutionController {
                     return;
                 };
                 self.last_update_ts = book.timestamp;
-                self.queue_state.best_bid = best_bid.price;
-                self.queue_state.best_ask = best_ask.price;
-                self.queue_state.last_reference_price = match self.side {
+                let last_reference_price = match self.side {
                     Side::Buy => best_bid.price,
                     Side::Sell => best_ask.price,
                 };
@@ -239,34 +258,67 @@ impl ExecutionController {
                     Side::Buy => best_bid.quantity,
                     Side::Sell => best_ask.quantity,
                 };
+                let spread_bps =
+                    (best_ask.price - best_bid.price).max(0.0) / last_reference_price.max(1e-9)
+                        * 10_000.0;
+                self.queue_state.best_bid = best_bid.price;
+                self.queue_state.best_ask = best_ask.price;
+                self.queue_state.last_reference_price = last_reference_price;
                 if let Some(current_price) = self.current_price {
                     let outbid = match self.side {
                         Side::Buy => best_bid.price > current_price,
                         Side::Sell => best_ask.price < current_price,
                     };
                     if outbid {
-                        self.queue_state.outbid_count = self.queue_state.outbid_count.saturating_add(1);
+                        self.order_state.times_outbid =
+                            self.order_state.times_outbid.saturating_add(1);
                     }
+                    self.queue_state = self.queue_engine.observe_book(
+                        visible_volume,
+                        self.fill_state.remaining_qty.max(self.fill_state.filled_qty + self.fill_state.remaining_qty),
+                        outbid,
+                        spread_bps,
+                        book.timestamp,
+                    );
+                } else {
+                    self.queue_state = self.queue_engine.observe_book(
+                        visible_volume,
+                        self.fill_state.remaining_qty.max(self.fill_state.filled_qty + self.fill_state.remaining_qty),
+                        false,
+                        spread_bps,
+                        book.timestamp,
+                    );
                 }
-                self.queue_state.volume_ahead = visible_volume.max(self.fill_state.remaining_qty);
-                self.queue_state.queue_position =
-                    self.queue_state.volume_ahead / self.fill_state.remaining_qty.max(1e-9);
-                let spread = (best_ask.price - best_bid.price).max(0.0);
-                self.queue_state.liquidity_pull_score = ((self.initial_volume_ahead - visible_volume)
+                self.order_state.time_in_book_ms = book.timestamp.saturating_sub(self.start_ts);
+                push_bounded_history(
+                    &mut self.order_state.queue_position_history,
+                    self.queue_state.queue_position_ratio,
+                );
+                let liquidity_pull_score = ((self.initial_volume_ahead - visible_volume)
                     / self.initial_volume_ahead.max(1e-9))
                     .clamp(0.0, 1.0)
-                    + (spread / self.queue_state.last_reference_price.max(1e-9) * 10_000.0 / 12.0)
+                    + (spread_bps / 12.0)
                         .clamp(0.0, 1.0)
                         * 0.25;
-                self.queue_state.fill_probability = self.estimate_fill_probability();
+                self.queue_state.fill_probability = self.estimate_fill_probability(liquidity_pull_score);
+                self.queue_state.expected_fill_time_ms = self.queue_state.expected_fill_time_ms.max(1.0);
                 self.queue_state.competition_state = classify_competition_state(
                     self.queue_state.fill_probability,
-                    self.queue_state.outbid_count,
-                    self.queue_state.liquidity_pull_score,
+                    self.order_state.times_outbid,
+                    liquidity_pull_score,
                 );
             }
             MarketUpdate::Trade(trade) => {
                 self.last_update_ts = trade.timestamp;
+                self.queue_state = self.queue_engine.observe_trade(
+                    trade.volume,
+                    self.fill_state.remaining_qty.max(self.fill_state.filled_qty + self.fill_state.remaining_qty),
+                    trade.timestamp,
+                );
+                push_bounded_history(
+                    &mut self.order_state.queue_position_history,
+                    self.queue_state.queue_position_ratio,
+                );
             }
         }
     }
@@ -279,28 +331,62 @@ impl ExecutionController {
         self.last_slippage_bps = event.slippage_bps;
         self.queue_state.competition_state =
             competition_state_from_flag(event.competition_flag, self.queue_state.competition_state);
+        self.recent_partial_fill_ratio = event.partial_fill_ratio;
+        self.recent_adverse_selection = match event.competition_flag {
+            CompetitionFlag::PartialFillToxicity => 0.9,
+            CompetitionFlag::RepeatedOutbid => 0.6,
+            CompetitionFlag::SlowFill => 0.45,
+            CompetitionFlag::CancelLatency => 0.35,
+            CompetitionFlag::None => self.recent_adverse_selection * 0.92,
+        };
         if event.filled_qty_delta > 0.0 {
             self.fill_state.filled_qty = event.cumulative_filled_qty.max(self.fill_state.filled_qty);
             self.fill_state.remaining_qty = event.remaining_qty.max(0.0);
             self.fill_state.last_fill_ts = Some(event.event_ts);
             let elapsed_ms = (event.event_ts.saturating_sub(self.start_ts)).max(1) as f64;
             self.fill_state.fill_rate = self.fill_state.filled_qty / elapsed_ms;
-            self.queue_state.fill_probability = self.estimate_fill_probability();
+            self.order_state.fill_progress = (self.fill_state.filled_qty
+                / (self.fill_state.filled_qty + self.fill_state.remaining_qty).max(1e-9))
+                .clamp(0.0, 1.0);
+            self.queue_state.fill_probability = self.estimate_fill_probability(0.0);
+            self.execution_alpha_mean = ewma(
+                self.execution_alpha_mean,
+                -(event.slippage_bps.max(0.0)) - self.recent_adverse_selection * 2.0,
+                0.15,
+            );
+            self.recent_capture_ratio = ewma(self.recent_capture_ratio, event.partial_fill_ratio - 0.5, 0.12);
+            if self.recent_capture_ratio < 0.0 {
+                self.negative_capture_streak = self.negative_capture_streak.saturating_add(1);
+            } else {
+                self.negative_capture_streak = self.negative_capture_streak.saturating_sub(1);
+            }
         }
+        self.recent_markout_degradation = ewma(
+            self.recent_markout_degradation,
+            (self.last_slippage_bps.max(0.0) * 0.08 + self.recent_adverse_selection).clamp(0.0, 1.0),
+            0.16,
+        );
     }
 
     pub fn evaluate_action(&self, now_ts: u64) -> ExecutionAction {
         if self.status.is_terminal() {
-            return ExecutionAction::Hold;
+            return ExecutionAction::HoldPassive;
         }
         if !self.cooldown_elapsed(now_ts) {
-            return ExecutionAction::Hold;
+            return ExecutionAction::HoldPassive;
         }
-        if self.initial_decision.edge_state == EdgeState::Invalid
+        if !self.validation_approved
+            || self.initial_decision.edge_state == EdgeState::Invalid
             || self.queue_state.competition_state == CompetitionState::Saturated
             || self.elapsed_time_ms(now_ts) > self.edge_half_life_ms
         {
-            return ExecutionAction::Abort;
+            return if self.fill_state.filled_qty > f64::EPSILON {
+                ExecutionAction::ExitPosition {
+                    price: self.cross_price(),
+                }
+            } else {
+                ExecutionAction::Abort
+            };
         }
         if self.expected_fill_time_ms > self.edge_half_life_ms {
             if self.should_switch_strategy(now_ts).is_some() {
@@ -310,18 +396,34 @@ impl ExecutionController {
             }
             return ExecutionAction::Abort;
         }
+        if self.should_exit_position() {
+            return ExecutionAction::ExitPosition {
+                price: self.cross_price(),
+            };
+        }
         if let Some(new_strategy) = self.should_switch_strategy(now_ts) {
             return ExecutionAction::SwitchStrategy { new_strategy };
         }
         if self.should_replace(now_ts) {
+            if matches!(self.queue_state.competition_state, CompetitionState::Competitive)
+                && self.current_strategy == ExecutionStrategy::Passive
+            {
+                if let Some(new_price) = self.compute_improved_price() {
+                    return ExecutionAction::StepAhead { new_price };
+                }
+            }
             if let Some(new_price) = self.compute_improved_price() {
-                return ExecutionAction::Replace { new_price };
+                return if self.should_cross_spread(now_ts) {
+                    ExecutionAction::CrossSpread
+                } else {
+                    ExecutionAction::Replace { new_price }
+                };
             }
         }
         if self.should_cancel(now_ts) {
             return ExecutionAction::Cancel;
         }
-        ExecutionAction::Hold
+        ExecutionAction::HoldPassive
     }
 
     pub fn should_replace(&self, now_ts: u64) -> bool {
@@ -331,7 +433,7 @@ impl ExecutionController {
         {
             return false;
         }
-        let queue_deteriorated = self.queue_state.queue_position > 1.4
+        let queue_deteriorated = self.queue_state.queue_position_ratio > 1.25
             || self.queue_state.volume_ahead
                 > self.initial_volume_ahead * self.queue_replace_volume_factor;
         let fill_prob_dropped = self.queue_state.fill_probability < self.min_fill_probability;
@@ -339,7 +441,8 @@ impl ExecutionController {
             self.queue_state.competition_state,
             CompetitionState::Competitive | CompetitionState::Saturated
         );
-        let time_pressure = self.elapsed_time_ms(now_ts) > self.expected_fill_time_ms * 0.65;
+        let time_pressure =
+            self.elapsed_time_ms(now_ts) > self.queue_state.expected_fill_time_ms.min(self.expected_fill_time_ms) * 0.55;
         (queue_deteriorated || fill_prob_dropped || competition_spike) && time_pressure
     }
 
@@ -374,7 +477,9 @@ impl ExecutionController {
     pub fn should_switch_strategy(&self, now_ts: u64) -> Option<ExecutionStrategy> {
         let time_remaining = (self.edge_half_life_ms - self.elapsed_time_ms(now_ts)).max(0.0);
         let strong_edge =
-            self.initial_decision.score > 0.78 && self.initial_decision.edge_reliability_score > 0.60;
+            self.initial_decision.score > 0.78
+                && self.initial_decision.edge_reliability_score > 0.60
+                && self.execution_alpha_mean > -1.5;
         if self.current_strategy == ExecutionStrategy::Passive
             && self.queue_state.fill_probability < self.min_fill_probability * 0.80
             && strong_edge
@@ -408,10 +513,10 @@ impl ExecutionController {
         if self.last_latency_us > 8_000 {
             return ExecutionFailureReason::LatencyTooHigh;
         }
-        if self.queue_state.liquidity_pull_score > 0.70 {
+        if self.recent_markout_degradation > 0.70 {
             return ExecutionFailureReason::LiquidityPull;
         }
-        if self.queue_state.outbid_count >= 2 {
+        if self.order_state.times_outbid >= 2 {
             return ExecutionFailureReason::Outbid;
         }
         ExecutionFailureReason::QueueTooDeep
@@ -422,23 +527,37 @@ impl ExecutionController {
             return false;
         }
         self.fill_state.filled_qty <= f64::EPSILON
-            && self.elapsed_time_ms(now_ts) > self.expected_fill_time_ms * 1.35
+            && self.elapsed_time_ms(now_ts)
+                > self.queue_state.expected_fill_time_ms.min(self.expected_fill_time_ms) * 1.20
     }
 
-    fn estimate_fill_probability(&self) -> f64 {
+    fn estimate_fill_probability(&self, liquidity_pull_score: f64) -> f64 {
         let base = if self.initial_decision.fill_probability == FillProbabilityClass::HighFill {
             0.72
         } else {
             0.42
         };
-        let queue_penalty = (self.queue_state.queue_position / 3.0).clamp(0.0, 0.65);
+        let queue_penalty = (self.queue_state.queue_position_ratio / 3.0).clamp(0.0, 0.65);
         let competition_penalty = match self.queue_state.competition_state {
             CompetitionState::Normal => 0.0,
             CompetitionState::Competitive => 0.18,
             CompetitionState::Saturated => 0.40,
         };
-        let outbid_penalty = (self.queue_state.outbid_count as f64 * 0.08).clamp(0.0, 0.24);
-        (base - queue_penalty - competition_penalty - outbid_penalty).clamp(0.0, 1.0)
+        let outbid_penalty = (self.order_state.times_outbid as f64 * 0.08).clamp(0.0, 0.24);
+        let alpha_penalty = (-self.execution_alpha_mean / 10.0).clamp(0.0, 0.15);
+        let markout_penalty = self.recent_markout_degradation.clamp(0.0, 0.18);
+        (
+            base
+                - queue_penalty
+                - competition_penalty
+                - outbid_penalty
+                - alpha_penalty
+                - markout_penalty
+                - liquidity_pull_score * 0.10
+                + self.queue_engine.cancel_rate().min(0.08)
+                + self.queue_engine.trade_through_rate().min(0.10)
+        )
+            .clamp(0.0, 1.0)
     }
 
     fn elapsed_time_ms(&self, now_ts: u64) -> f64 {
@@ -455,6 +574,15 @@ impl ExecutionController {
             ExecutionAction::Cancel => {
                 self.cancel_count = self.cancel_count.saturating_add(1);
             }
+            ExecutionAction::StepAhead { new_price } => {
+                self.replace_count = self.replace_count.saturating_add(1);
+                self.current_price = Some(*new_price);
+            }
+            ExecutionAction::CrossSpread => {
+                self.current_strategy = ExecutionStrategy::Aggressive;
+                self.replace_count = self.replace_count.saturating_add(1);
+                self.current_price = self.cross_price();
+            }
             ExecutionAction::Replace { new_price } => {
                 self.replace_count = self.replace_count.saturating_add(1);
                 self.current_price = Some(*new_price);
@@ -462,12 +590,47 @@ impl ExecutionController {
             ExecutionAction::SwitchStrategy { new_strategy } => {
                 self.current_strategy = *new_strategy;
             }
+            ExecutionAction::ExitPosition { .. } => {
+                self.cancel_count = self.cancel_count.saturating_add(1);
+            }
             ExecutionAction::Abort => {
                 self.cancel_count = self.cancel_count.saturating_add(1);
                 self.status = OrderLifecycleState::Canceled;
             }
-            ExecutionAction::Hold => {}
+            ExecutionAction::HoldPassive => {}
         }
+        self.order_state.cancel_replace_count = self.cancel_count + self.replace_count;
+    }
+
+    fn should_exit_position(&self) -> bool {
+        if self.fill_state.filled_qty <= f64::EPSILON {
+            return false;
+        }
+        self.negative_capture_streak >= 4
+            || self.recent_capture_ratio < -0.05
+            || self.recent_adverse_selection > 0.75
+            || self.recent_markout_degradation > 0.70
+            || self.execution_alpha_mean < -2.0
+    }
+
+    fn should_cross_spread(&self, now_ts: u64) -> bool {
+        self.current_strategy != ExecutionStrategy::Defensive
+            && self.queue_state.fill_probability < self.min_fill_probability * 0.65
+            && self.elapsed_time_ms(now_ts) > self.edge_half_life_ms * 0.35
+            && self.initial_decision.edge_reliability_score > 0.62
+    }
+
+    fn cross_price(&self) -> Option<f64> {
+        let reference = self.current_price.or(Some(self.queue_state.last_reference_price))?;
+        let tick = derived_tick(
+            self.queue_state.best_bid,
+            self.queue_state.best_ask,
+            reference,
+        );
+        Some(match self.side {
+            Side::Buy => self.queue_state.best_ask.max(reference + tick),
+            Side::Sell => self.queue_state.best_bid.min(reference - tick),
+        })
     }
 }
 
@@ -573,7 +736,20 @@ fn evaluate_and_convert(
 ) -> Option<ExecutionInstruction> {
     let action = controller.evaluate_action(now_ts);
     let instruction = match action {
-        ExecutionAction::Hold => return None,
+        ExecutionAction::HoldPassive => return None,
+        ExecutionAction::StepAhead { new_price } => Some(ExecutionInstruction::Replace {
+            order_id: controller.order_id.clone(),
+            symbol: controller.symbol.clone(),
+            new_price,
+            reason: "step_ahead",
+        }),
+        ExecutionAction::CrossSpread => Some(ExecutionInstruction::SwitchStrategy {
+            order_id: controller.order_id.clone(),
+            symbol: controller.symbol.clone(),
+            new_strategy: ExecutionStrategy::Aggressive,
+            price: controller.cross_price(),
+            reason: "cross_spread",
+        }),
         ExecutionAction::Cancel => Some(ExecutionInstruction::Cancel {
             order_id: controller.order_id.clone(),
             symbol: controller.symbol.clone(),
@@ -591,6 +767,16 @@ fn evaluate_and_convert(
             new_strategy,
             price: controller.compute_improved_price(),
             reason: "adaptive_switch",
+        }),
+        ExecutionAction::ExitPosition { price } => Some(ExecutionInstruction::ExitPosition {
+            order_id: controller.order_id.clone(),
+            symbol: controller.symbol.clone(),
+            side: controller.side.opposite(),
+            size: controller.fill_state.filled_qty.min(
+                controller.fill_state.filled_qty + controller.fill_state.remaining_qty,
+            ),
+            price,
+            reason: "execution_dominance_exit",
         }),
         ExecutionAction::Abort => Some(ExecutionInstruction::Abort {
             order_id: controller.order_id.clone(),
@@ -673,6 +859,22 @@ fn derived_tick(best_bid: f64, best_ask: f64, reference: f64) -> f64 {
         .min(reference.abs() * 0.00025)
 }
 
+fn ewma(current: f64, sample: f64, alpha: f64) -> f64 {
+    if current == 0.0 {
+        sample
+    } else {
+        current * (1.0 - alpha) + sample * alpha
+    }
+}
+
+fn push_bounded_history(history: &mut Vec<f64>, value: f64) {
+    const MAX_HISTORY: usize = 16;
+    if history.len() == MAX_HISTORY {
+        history.remove(0);
+    }
+    history.push(value);
+}
+
 fn scored_decision_from_intent(intent: &OrderIntent) -> ScoredDecision {
     ScoredDecision {
         market: crate::types::MarketEvent {
@@ -708,9 +910,14 @@ fn scored_decision_from_intent(intent: &OrderIntent) -> ScoredDecision {
         edge_regime: intent.edge_regime,
         edge_reliability_score: intent.edge_reliability_score,
         edge_half_life_samples: intent.edge_half_life_samples,
+        edge_capture_mean: intent.edge_capture_mean,
+        negative_capture_streak: intent.negative_capture_streak,
+        execution_alpha_mean: intent.execution_alpha_mean,
+        markout_degradation_score: intent.markout_degradation_score,
         dynamic_size_multiplier: intent.dynamic_size_multiplier,
         competition_state: intent.competition_state,
         competition_score: intent.competition_score,
+        trading_enabled: intent.trading_enabled,
         fill_probability: intent.fill_probability,
     }
 }
@@ -816,9 +1023,14 @@ mod tests {
             edge_regime: EdgeRegime::Stable,
             edge_reliability_score: 0.8,
             edge_half_life_samples: 3.0,
+            edge_capture_mean: 0.25,
+            negative_capture_streak: 0,
+            execution_alpha_mean: 0.15,
+            markout_degradation_score: 0.10,
             dynamic_size_multiplier: 0.9,
             competition_state: CompetitionState::Normal,
             competition_score: 0.1,
+            trading_enabled: true,
             fill_probability: FillProbabilityClass::LowFill,
         }
     }
@@ -853,9 +1065,14 @@ mod tests {
             edge_regime: decision.edge_regime,
             edge_reliability_score: decision.edge_reliability_score,
             edge_half_life_samples: decision.edge_half_life_samples,
+            edge_capture_mean: decision.edge_capture_mean,
+            negative_capture_streak: decision.negative_capture_streak,
+            execution_alpha_mean: decision.execution_alpha_mean,
+            markout_degradation_score: decision.markout_degradation_score,
             dynamic_size_multiplier: decision.dynamic_size_multiplier,
             competition_state: decision.competition_state,
             competition_score: decision.competition_score,
+            trading_enabled: decision.trading_enabled,
             execution_mode: ExecutionMode::Passive,
             queue_estimate: QueueEstimate {
                 queue_position: 1.0,
@@ -892,6 +1109,9 @@ mod tests {
             execution_action_cooldown_ms: 10,
             queue_replace_volume_factor: 1.25,
             min_fill_probability: 0.28,
+            trigger_drop_pct: 0.015,
+            trigger_reset_pct: 0.025,
+            model_weights_path: String::new(),
         }
     }
 
@@ -909,11 +1129,11 @@ mod tests {
         controller.queue_state.best_bid = 100.0;
         controller.queue_state.best_ask = 100.05;
         controller.queue_state.volume_ahead = 2.0;
-        controller.queue_state.queue_position = 2.2;
+        controller.queue_state.queue_position_ratio = 2.2;
         controller.queue_state.fill_probability = 0.10;
         assert!(matches!(
             controller.evaluate_action(1_140),
-            ExecutionAction::Replace { .. }
+            ExecutionAction::StepAhead { .. } | ExecutionAction::Replace { .. }
         ));
     }
 
@@ -938,15 +1158,15 @@ mod tests {
         controller.initial_decision.score = 0.60;
         controller.initial_decision.edge_reliability_score = 0.50;
         controller.queue_state.fill_probability = 0.05;
-        controller.queue_state.queue_position = 3.0;
+        controller.queue_state.queue_position_ratio = 3.0;
         controller.queue_state.volume_ahead = 3.0;
-        assert_eq!(controller.evaluate_action(1_300), ExecutionAction::Hold);
+        assert_eq!(controller.evaluate_action(1_300), ExecutionAction::HoldPassive);
     }
 
     #[test]
     fn failure_classification_correctness() {
         let mut controller = ExecutionController::new(&intent(), &config());
-        controller.queue_state.outbid_count = 2;
+        controller.order_state.times_outbid = 2;
         assert_eq!(
             controller.classify_failure(1_040),
             ExecutionFailureReason::Outbid
@@ -957,6 +1177,32 @@ mod tests {
     fn controller_reacts_to_competition_spike() {
         let mut controller = ExecutionController::new(&intent(), &config());
         controller.queue_state.competition_state = CompetitionState::Saturated;
+        assert_eq!(controller.evaluate_action(1_050), ExecutionAction::Abort);
+    }
+
+    #[test]
+    fn competition_saturation_avoids_passive_orders() {
+        let mut controller = ExecutionController::new(&intent(), &config());
+        controller.queue_state.competition_state = CompetitionState::Saturated;
+        assert_ne!(controller.evaluate_action(1_050), ExecutionAction::HoldPassive);
+    }
+
+    #[test]
+    fn queue_deterioration_triggers_exit_for_partial_fill() {
+        let mut controller = ExecutionController::new(&intent(), &config());
+        controller.fill_state.filled_qty = 0.4;
+        controller.fill_state.remaining_qty = 0.6;
+        controller.negative_capture_streak = 5;
+        assert!(matches!(
+            controller.evaluate_action(1_120),
+            ExecutionAction::ExitPosition { .. }
+        ));
+    }
+
+    #[test]
+    fn no_execution_without_edge_validation_approval() {
+        let mut controller = ExecutionController::new(&intent(), &config());
+        controller.validation_approved = false;
         assert_eq!(controller.evaluate_action(1_050), ExecutionAction::Abort);
     }
 }
