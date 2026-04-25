@@ -14,6 +14,9 @@ import (
 
 type Submitter interface {
 	Submit(context.Context, domain.ExecutionRequest) (domain.Order, error)
+	Cancel(context.Context, string, string) (domain.Order, error)
+	Replace(context.Context, string, float64, string) (domain.Order, error)
+	SwitchStrategy(context.Context, string, string, *float64, string) (domain.Order, error)
 }
 
 type Server struct {
@@ -37,9 +40,13 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /execution/ledger", s.executionLedger)
 	mux.HandleFunc("GET /execution/events", s.executionEvents)
 	mux.HandleFunc("GET /execution/reconciliation", s.executionReconciliation)
+	mux.HandleFunc("GET /account/state", s.accountState)
 	mux.HandleFunc("POST /risk/execution-events", s.executionEvent)
 	mux.HandleFunc("POST /kill-switch", s.killSwitch)
 	mux.HandleFunc("POST /execution/requests", s.executionRequest)
+	mux.HandleFunc("POST /execution/orders/{id}/cancel", s.executionCancel)
+	mux.HandleFunc("POST /execution/orders/{id}/replace", s.executionReplace)
+	mux.HandleFunc("POST /execution/orders/{id}/strategy", s.executionSwitchStrategy)
 	mux.HandleFunc("GET /ws", s.hub.ServeWS)
 	return withJSON(mux)
 }
@@ -75,6 +82,10 @@ func (s *Server) executionEvents(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) executionReconciliation(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.store.Reconciliation())
+}
+
+func (s *Server) accountState(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.store.AccountState())
 }
 
 func (s *Server) executionEvent(w http.ResponseWriter, r *http.Request) {
@@ -114,6 +125,63 @@ func (s *Server) executionRequest(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 750*time.Millisecond)
 	defer cancel()
 	order, err := s.submitter.Submit(ctx, req)
+	if err != nil {
+		writeJSON(w, http.StatusPreconditionFailed, map[string]any{"error": err.Error(), "order": order})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, order)
+}
+
+func (s *Server) executionCancel(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_json"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
+	defer cancel()
+	order, err := s.submitter.Cancel(ctx, r.PathValue("id"), req.Reason)
+	if err != nil {
+		writeJSON(w, http.StatusPreconditionFailed, map[string]any{"error": err.Error(), "order": order})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, order)
+}
+
+func (s *Server) executionReplace(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		NewPrice float64 `json:"new_price"`
+		Reason   string  `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_json"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
+	defer cancel()
+	order, err := s.submitter.Replace(ctx, r.PathValue("id"), req.NewPrice, req.Reason)
+	if err != nil {
+		writeJSON(w, http.StatusPreconditionFailed, map[string]any{"error": err.Error(), "order": order})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, order)
+}
+
+func (s *Server) executionSwitchStrategy(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Strategy string   `json:"strategy"`
+		Price    *float64 `json:"price"`
+		Reason   string   `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_json"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
+	defer cancel()
+	order, err := s.submitter.SwitchStrategy(ctx, r.PathValue("id"), req.Strategy, req.Price, req.Reason)
 	if err != nil {
 		writeJSON(w, http.StatusPreconditionFailed, map[string]any{"error": err.Error(), "order": order})
 		return
