@@ -3,7 +3,7 @@ use crate::{
     config::Config,
     metrics::Metrics,
     types::{
-        Decision, Direction, ExecutionMode, FillEvent, FillProbabilityClass, FlowSignal,
+        Decision, Direction, ExecutionMode, FillEvent, FlowSignal,
         OrderIntent, OrderRequest, OrderType, Position, QueueEstimate, RegimeKind, ScoredDecision,
         Side, TimingSignal,
     },
@@ -229,7 +229,7 @@ fn intent(
         competition_score: signal.competition_score,
         execution_mode,
         queue_estimate: QueueEstimate::default(),
-        fill_probability: FillProbabilityClass::LowFill,
+        fill_probability: signal.fill_probability,
         meta: None,
     }
 }
