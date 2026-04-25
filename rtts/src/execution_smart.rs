@@ -202,6 +202,44 @@ pub async fn run(
                 )
                 .await;
             }
+            ExecutionInstruction::ExitPosition {
+                order_id,
+                symbol,
+                side,
+                size,
+                price,
+                reason,
+            } => {
+                let request = ControlPlaneExecutionRequest {
+                    idempotency_key: format!("{order_id}-exit"),
+                    symbol: symbol.clone(),
+                    side: match side {
+                        Side::Buy => "BUY".to_string(),
+                        Side::Sell => "SELL".to_string(),
+                    },
+                    size,
+                    price,
+                    decision: "Exit",
+                    signal_time: iso8601_utc(now_ms()),
+                    max_slippage_bps: 8.0,
+                    reduce_only: true,
+                    request_timestamp: iso8601_utc(now_ms()),
+                    expected_realized_markout: 0.0,
+                    regime_kind: "ExecutionExit".to_string(),
+                    regime_volatility: 0.0,
+                    regime_spread: 0.0,
+                    regime_trend_strength: 0.0,
+                };
+                post_control_action(
+                    &client,
+                    &format!("{root}/execution/requests"),
+                    &request,
+                    &metrics,
+                    &symbol,
+                    reason,
+                )
+                .await;
+            }
         }
     }
 }
