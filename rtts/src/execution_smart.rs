@@ -1,6 +1,7 @@
 use crate::{
     accounting::latency::{latency_impact_score, LatencyDistributions},
     config::Config,
+    execution_controller::{ExecutionInstruction, ExecutionStrategy},
     execution_mode::ExecutionModeSwitch,
     fill_probability::FillProbabilityModel,
     metrics::Metrics,
@@ -34,107 +35,172 @@ struct ControlPlaneExecutionRequest {
     regime_trend_strength: f64,
 }
 
+#[derive(Serialize)]
+struct CancelRequest<'a> {
+    reason: &'a str,
+}
+
+#[derive(Serialize)]
+struct ReplaceRequest<'a> {
+    new_price: f64,
+    reason: &'a str,
+}
+
+#[derive(Serialize)]
+struct SwitchStrategyRequest<'a> {
+    strategy: &'a str,
+    price: Option<f64>,
+    reason: &'a str,
+}
+
 pub async fn run(
     cfg: Config,
-    mut rx: Receiver<OrderIntent>,
+    mut rx: Receiver<ExecutionInstruction>,
     metrics: Arc<Metrics>,
 ) {
     let mut symbol_profile = SymbolProfileEngine::new(cfg.symbol.clone());
     let latency_distributions = LatencyDistributions::default();
     let client = Client::new();
-    let endpoint = format!("{}/execution/requests", cfg.control_plane_http.trim_end_matches('/'));
+    let root = cfg.control_plane_http.trim_end_matches('/').to_string();
 
-    while let Some(mut intent) = rx.recv().await {
-        if intent.data_latency_ms > cfg.max_data_age_ms {
-            metrics
-                .rejected_orders_total
-                .with_label_values(&["stale_before_execute"])
-                .inc();
-            continue;
-        }
-        if intent
-            .meta
-            .as_ref()
-            .is_some_and(|meta| meta.decision != crate::types::FinalDecision::Execute)
-        {
-            metrics
-                .rejected_orders_total
-                .with_label_values(&["meta_not_execute"])
-                .inc();
-            continue;
-        }
+    while let Some(instruction) = rx.recv().await {
+        match instruction {
+            ExecutionInstruction::Submit {
+                mut intent,
+                idempotency_key,
+            } => {
+                if intent.data_latency_ms > cfg.max_data_age_ms {
+                    metrics
+                        .rejected_orders_total
+                        .with_label_values(&["stale_before_execute"])
+                        .inc();
+                    continue;
+                }
+                if intent
+                    .meta
+                    .as_ref()
+                    .is_some_and(|meta| meta.decision != crate::types::FinalDecision::Execute)
+                {
+                    metrics
+                        .rejected_orders_total
+                        .with_label_values(&["meta_not_execute"])
+                        .inc();
+                    continue;
+                }
 
-        let expected_realized_markout = expected_real_markout_after_cost(&intent, &latency_distributions);
-        if expected_realized_markout <= execution_threshold(&cfg) {
-            metrics
-                .rejected_orders_total
-                .with_label_values(&["weak_expected_real_markout"])
-                .inc();
-            continue;
-        }
+                let expected_realized_markout =
+                    expected_real_markout_after_cost(&intent, &latency_distributions);
+                if expected_realized_markout <= execution_threshold(&cfg) {
+                    metrics
+                        .rejected_orders_total
+                        .with_label_values(&["weak_expected_real_markout"])
+                        .inc();
+                    continue;
+                }
 
-        symbol_profile.observe_intent(&intent);
-        prepare_execution(&mut intent, symbol_profile.profile());
-        let request = ControlPlaneExecutionRequest {
-            idempotency_key: format!(
-                "{}-{}-{}",
-                intent.request.symbol,
-                intent.timestamp,
-                match intent.request.side {
+                symbol_profile.observe_intent(&intent);
+                prepare_execution(&mut intent, symbol_profile.profile());
+                let request = ControlPlaneExecutionRequest {
+                    idempotency_key,
+                    symbol: intent.request.symbol.clone(),
+                    side: match intent.request.side {
+                        Side::Buy => "BUY".to_string(),
+                        Side::Sell => "SELL".to_string(),
+                    },
+                    size: intent.request.size,
+                    price: intent.request.price,
+                    decision: "Execute",
+                    signal_time: iso8601_utc(intent.timestamp),
+                    max_slippage_bps: intent.request.max_slippage_bps,
+                    reduce_only: intent.request.reduce_only,
+                    request_timestamp: iso8601_utc(now_ms()),
+                    expected_realized_markout,
+                    regime_kind: format!("{:?}", intent.context.regime),
+                    regime_volatility: intent.regime.volatility,
+                    regime_spread: intent.regime.spread,
+                    regime_trend_strength: intent.regime.trend_strength,
+                };
+                let side_label = match intent.request.side {
                     Side::Buy => "buy",
                     Side::Sell => "sell",
-                }
-            ),
-            symbol: intent.request.symbol.clone(),
-            side: match intent.request.side {
-                Side::Buy => "BUY".to_string(),
-                Side::Sell => "SELL".to_string(),
-            },
-            size: intent.request.size,
-            price: intent.request.price,
-            decision: "Execute",
-            signal_time: iso8601_utc(intent.timestamp),
-            max_slippage_bps: intent.request.max_slippage_bps,
-            reduce_only: intent.request.reduce_only,
-            request_timestamp: iso8601_utc(now_ms()),
-            expected_realized_markout,
-            regime_kind: format!("{:?}", intent.context.regime),
-            regime_volatility: intent.regime.volatility,
-            regime_spread: intent.regime.spread,
-            regime_trend_strength: intent.regime.trend_strength,
-        };
-        let side_label = match intent.request.side {
-            Side::Buy => "buy",
-            Side::Sell => "sell",
-        };
-        metrics.orders_total.with_label_values(&[side_label]).inc();
-        match client.post(&endpoint).json(&request).send().await {
-            Ok(response) if response.status().is_success() => {
-                info!(
-                    symbol = intent.request.symbol,
-                    ?intent.request.side,
-                    ?intent.execution_mode,
-                    expected_realized_markout,
-                    "execution request submitted to control-plane"
-                );
+                };
+                metrics.orders_total.with_label_values(&[side_label]).inc();
+                post_control_action(
+                    &client,
+                    &format!("{root}/execution/requests"),
+                    &request,
+                    &metrics,
+                    &intent.request.symbol,
+                    "submit",
+                )
+                .await;
             }
-            Ok(response) => {
-                metrics
-                    .rejected_orders_total
-                    .with_label_values(&["control_plane_rejected"])
-                    .inc();
-                warn!(
-                    status = %response.status(),
-                    symbol = intent.request.symbol,
-                    "control-plane rejected execution request"
-                );
+            ExecutionInstruction::Cancel {
+                order_id,
+                symbol,
+                reason,
+            } => {
+                post_control_action(
+                    &client,
+                    &format!("{root}/execution/orders/{order_id}/cancel"),
+                    &CancelRequest { reason },
+                    &metrics,
+                    &symbol,
+                    "cancel",
+                )
+                .await;
             }
-            Err(err) => {
-                metrics
-                    .rejected_orders_total
-                    .with_label_values(&["control_plane_unreachable"])
-                    .inc();
-                warn!(%err, symbol = intent.request.symbol, "failed to submit execution request");
+            ExecutionInstruction::Replace {
+                order_id,
+                symbol,
+                new_price,
+                reason,
+            } => {
+                post_control_action(
+                    &client,
+                    &format!("{root}/execution/orders/{order_id}/replace"),
+                    &ReplaceRequest { new_price, reason },
+                    &metrics,
+                    &symbol,
+                    "replace",
+                )
+                .await;
+            }
+            ExecutionInstruction::SwitchStrategy {
+                order_id,
+                symbol,
+                new_strategy,
+                price,
+                reason,
+            } => {
+                post_control_action(
+                    &client,
+                    &format!("{root}/execution/orders/{order_id}/strategy"),
+                    &SwitchStrategyRequest {
+                        strategy: strategy_label(new_strategy),
+                        price,
+                        reason,
+                    },
+                    &metrics,
+                    &symbol,
+                    "switch_strategy",
+                )
+                .await;
+            }
+            ExecutionInstruction::Abort {
+                order_id,
+                symbol,
+                reason,
+            } => {
+                post_control_action(
+                    &client,
+                    &format!("{root}/execution/orders/{order_id}/cancel"),
+                    &CancelRequest { reason },
+                    &metrics,
+                    &symbol,
+                    "abort",
+                )
+                .await;
             }
         }
     }
@@ -200,4 +266,41 @@ fn iso8601_utc(timestamp_ms: u64) -> String {
         .single()
         .unwrap_or_else(Utc::now)
         .to_rfc3339()
+}
+
+async fn post_control_action<T: Serialize>(
+    client: &Client,
+    endpoint: &str,
+    payload: &T,
+    metrics: &Metrics,
+    symbol: &str,
+    action: &str,
+) {
+    match client.post(endpoint).json(payload).send().await {
+        Ok(response) if response.status().is_success() => {
+            info!(%symbol, action, "execution control action submitted");
+        }
+        Ok(response) => {
+            metrics
+                .rejected_orders_total
+                .with_label_values(&["control_plane_action_rejected"])
+                .inc();
+            warn!(status = %response.status(), %symbol, action, "control-plane rejected execution action");
+        }
+        Err(err) => {
+            metrics
+                .rejected_orders_total
+                .with_label_values(&["control_plane_action_unreachable"])
+                .inc();
+            warn!(%err, %symbol, action, "failed to submit execution control action");
+        }
+    }
+}
+
+fn strategy_label(strategy: ExecutionStrategy) -> &'static str {
+    match strategy {
+        ExecutionStrategy::Passive => "PASSIVE",
+        ExecutionStrategy::Aggressive => "AGGRESSIVE",
+        ExecutionStrategy::Defensive => "DEFENSIVE",
+    }
 }
