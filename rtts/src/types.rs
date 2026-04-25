@@ -267,6 +267,68 @@ impl Default for MarketContext {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct TriggerSnapshot {
+    pub local_high: f64,
+    pub drop_pct: f64,
+    pub in_observation: bool,
+    pub confirmed: bool,
+    pub expected_edge: f64,
+    pub should_exit: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReversalState {
+    #[default]
+    Idle,
+    ObserveLongToShort,
+    ObserveShortToLong,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct ReversalSnapshot {
+    pub state: ReversalState,
+    pub active: bool,
+    pub confirmed: bool,
+    pub direction: Direction,
+    pub confidence: f64,
+    pub expected_edge: f64,
+}
+
+impl Default for ReversalSnapshot {
+    fn default() -> Self {
+        Self {
+            state: ReversalState::Idle,
+            active: false,
+            confirmed: false,
+            direction: Direction::Flat,
+            confidence: 0.0,
+            expected_edge: 0.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct ReversalClassifierSnapshot {
+    pub reversal_probability: f64,
+    pub continuation_probability: f64,
+    pub chop_probability: f64,
+    pub intent_score: f64,
+    pub movement_score: f64,
+    pub ready_long: bool,
+    pub ready_short: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct EntryScoringSnapshot {
+    pub enter_long: bool,
+    pub enter_short: bool,
+    pub wait: bool,
+    pub score: f64,
+    pub confidence: f64,
+    pub expected_edge: f64,
+}
+
 impl Default for SymbolProfile {
     fn default() -> Self {
         Self {
@@ -330,6 +392,10 @@ pub struct MicrostructureFrame {
     pub context: MarketContext,
     pub flow: FlowState,
     pub timing: MicroTimingState,
+    pub trigger: TriggerSnapshot,
+    pub reversal: ReversalSnapshot,
+    pub reversal_classifier: ReversalClassifierSnapshot,
+    pub entry_scoring: EntryScoringSnapshot,
     pub stale: bool,
 }
 
@@ -357,9 +423,14 @@ pub struct ScoredDecision {
     pub edge_regime: EdgeRegime,
     pub edge_reliability_score: f64,
     pub edge_half_life_samples: f64,
+    pub edge_capture_mean: f64,
+    pub negative_capture_streak: usize,
+    pub execution_alpha_mean: f64,
+    pub markout_degradation_score: f64,
     pub dynamic_size_multiplier: f64,
     pub competition_state: CompetitionState,
     pub competition_score: f64,
+    pub trading_enabled: bool,
     pub fill_probability: FillProbabilityClass,
 }
 
@@ -511,9 +582,14 @@ pub struct OrderIntent {
     pub edge_regime: EdgeRegime,
     pub edge_reliability_score: f64,
     pub edge_half_life_samples: f64,
+    pub edge_capture_mean: f64,
+    pub negative_capture_streak: usize,
+    pub execution_alpha_mean: f64,
+    pub markout_degradation_score: f64,
     pub dynamic_size_multiplier: f64,
     pub competition_state: CompetitionState,
     pub competition_score: f64,
+    pub trading_enabled: bool,
     pub execution_mode: ExecutionMode,
     pub queue_estimate: QueueEstimate,
     pub fill_probability: FillProbabilityClass,
@@ -563,6 +639,7 @@ pub struct LearningSample {
     pub pnl: f64,
     pub expected_markout: f64,
     pub realized_markout: f64,
+    pub execution_alpha: f64,
     pub fill_ratio: f64,
     pub fees_paid: f64,
     pub rebates_received: f64,
