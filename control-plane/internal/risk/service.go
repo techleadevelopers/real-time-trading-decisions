@@ -86,6 +86,10 @@ func (s *Service) Evaluate(req domain.ExecutionRequest) RiskDecision {
 		return s.observeDecision(RiskDecision{Allowed: false, RiskScore: 0.5, Reason: "missing_mark_price", Action: "deny", ReasonCategory: FailureStaleSkip, RegimeState: s.feedback.Snapshot().RegimeState, Confidence: 0.8})
 	}
 	orderNotional := req.Size * price
+	account := s.store.AccountState()
+	if account.AvailableBalance > 0 && !req.ReduceOnly && orderNotional > account.AvailableBalance*account.LeverageOrDefault() {
+		return s.observeDecision(RiskDecision{Allowed: false, RiskScore: 1, Reason: "insufficient_available_balance", Action: "deny", ReasonCategory: FailureRiskReject, RegimeState: s.feedback.Snapshot().RegimeState, Confidence: 1})
+	}
 	dynamicPositionLimit := s.cfg.MaxPositionUSD
 	if s.intelligence.Snapshot().SystemStressIndex > 0.55 {
 		dynamicPositionLimit *= 0.65
@@ -101,6 +105,10 @@ func (s *Service) Evaluate(req domain.ExecutionRequest) RiskDecision {
 	}
 	base := RiskDecision{Allowed: true, SizeMultiplier: 1, RiskScore: s.intelligence.Snapshot().SystemStressIndex, Reason: "allowed", Action: "allow", RegimeState: s.feedback.Snapshot().RegimeState, Confidence: 1}
 	return s.observeDecision(s.intelligence.Evaluate(req, base))
+}
+
+func (s *Service) UpdateAccountState(account domain.AccountState) {
+	s.store.SetAccountState(account)
 }
 
 func (s *Service) Validate(req domain.ExecutionRequest) error {
