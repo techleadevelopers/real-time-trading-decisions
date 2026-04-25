@@ -12,6 +12,7 @@ import (
 	"control-plane/internal/api"
 	"control-plane/internal/config"
 	"control-plane/internal/execution"
+	"control-plane/internal/execution/bingx"
 	"control-plane/internal/marketdata"
 	"control-plane/internal/pipeline"
 	"control-plane/internal/risk"
@@ -32,8 +33,34 @@ func main() {
 	store := state.NewStore()
 	riskSvc := risk.NewService(cfg.Risk, store)
 	hub := api.NewHub(updates, cfg.WebSocketWriteTimeout)
-	exchange := execution.NewPaperExchange(store, updates)
+	var exchange execution.ExchangeClient = execution.NewPaperExchange(store, updates)
+	if cfg.BingX.Enabled {
+		client := bingx.New(cfg.BingX.APIKey, cfg.BingX.SecretKey, cfg.BingX.BaseURL, cfg.BingX.WSURL)
+		report, account, err := client.Reconcile(ctx, store)
+		if err != nil {
+			logger.Error("bingx reconciliation failed", "err", err)
+			os.Exit(1)
+		}
+		store.SetAccountState(account)
+		if !report.Matched {
+			logger.Warn("bingx reconciliation detected mismatches", "details", report.Details)
+		}
+		exchange = client
+	}
 	execGateway := execution.NewGateway(store, riskSvc, exchange, updates, cfg.Execution)
+	if asyncExchange, ok := exchange.(execution.AsyncExchangeClient); ok {
+		if err := asyncExchange.Start(ctx, func(update execution.AsyncExchangeUpdate) {
+			if err := execGateway.ApplyAsyncUpdate(update); err != nil {
+				slog.Warn("async exchange update failed", "err", err)
+			}
+			if account, err := asyncExchange.GetAccountState(context.Background()); err == nil {
+				store.SetAccountState(account)
+			}
+		}); err != nil {
+			logger.Error("failed to start exchange stream", "err", err)
+			os.Exit(1)
+		}
+	}
 
 	pipe := pipeline.New(events, updates, store, riskSvc, cfg.Pipeline)
 	md := marketdata.NewBinanceGateway(cfg.MarketData, events)
