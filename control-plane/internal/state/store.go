@@ -15,8 +15,11 @@ type Store struct {
 	positions   map[string]domain.Position
 	orders      map[string]domain.Order
 	idempotency map[string]string
+	exchangeIDs map[string]string
 	ledger      []domain.FillLedgerEntry
 	executions  []domain.ExecutionEvent
+	account     domain.AccountState
+	reports     []domain.ReconciliationReport
 }
 
 func NewStore() *Store {
@@ -24,6 +27,7 @@ func NewStore() *Store {
 		positions:   make(map[string]domain.Position),
 		orders:      make(map[string]domain.Order),
 		idempotency: make(map[string]string),
+		exchangeIDs: make(map[string]string),
 	}
 }
 
@@ -42,6 +46,9 @@ func (s *Store) ReserveOrder(order domain.Order) (domain.Order, bool, error) {
 	order.Status = domain.OrderNew
 	s.orders[order.ID] = order
 	s.idempotency[order.IdempotencyKey] = order.ID
+	if order.ExchangeOrderID != "" {
+		s.exchangeIDs[order.ExchangeOrderID] = order.ID
+	}
 	return order, false, nil
 }
 
@@ -50,6 +57,9 @@ func (s *Store) UpdateOrder(order domain.Order) {
 	defer s.mu.Unlock()
 	order.UpdatedAt = time.Now().UTC()
 	s.orders[order.ID] = order
+	if order.ExchangeOrderID != "" {
+		s.exchangeIDs[order.ExchangeOrderID] = order.ID
+	}
 }
 
 func (s *Store) MarkOrderSent(orderID string, sentAt time.Time) (domain.Order, error) {
@@ -96,9 +106,28 @@ func (s *Store) CancelOrder(orderID, reason string, canceledAt time.Time) (domai
 	return order, nil
 }
 
+func (s *Store) ReplaceOrderPrice(orderID string, price *float64) (domain.Order, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	order, ok := s.orders[orderID]
+	if !ok {
+		return domain.Order{}, errors.New("order not found")
+	}
+	if order.Status == domain.OrderFilled || order.Status == domain.OrderCanceled || order.Status == domain.OrderRejected {
+		return order, nil
+	}
+	order.Price = price
+	order.UpdatedAt = time.Now().UTC()
+	s.orders[order.ID] = order
+	return order, nil
+}
+
 func (s *Store) ApplyExternalFill(orderID string, fill domain.FillLedgerEntry, event domain.ExecutionEvent) (domain.Order, domain.Position, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if localID, ok := s.exchangeIDs[orderID]; ok {
+		orderID = localID
+	}
 	order, ok := s.orders[orderID]
 	if !ok {
 		return domain.Order{}, domain.Position{}, errors.New("order not found")
@@ -154,9 +183,114 @@ func (s *Store) ApplyExternalFill(orderID string, fill domain.FillLedgerEntry, e
 	return order, pos, nil
 }
 
+func (s *Store) BindExchangeOrderID(orderID, exchangeOrderID string) (domain.Order, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	order, ok := s.orders[orderID]
+	if !ok {
+		return domain.Order{}, errors.New("order not found")
+	}
+	order.ExchangeOrderID = exchangeOrderID
+	order.UpdatedAt = time.Now().UTC()
+	s.orders[order.ID] = order
+	if exchangeOrderID != "" {
+		s.exchangeIDs[exchangeOrderID] = order.ID
+	}
+	return order, nil
+}
+
+func (s *Store) UpsertOrder(order domain.Order) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if existingID, ok := s.idempotency[order.IdempotencyKey]; ok && existingID != "" {
+		order.ID = existingID
+	}
+	order.UpdatedAt = time.Now().UTC()
+	if order.CreatedAt.IsZero() {
+		order.CreatedAt = order.UpdatedAt
+	}
+	s.orders[order.ID] = order
+	if order.IdempotencyKey != "" {
+		s.idempotency[order.IdempotencyKey] = order.ID
+	}
+	if order.ExchangeOrderID != "" {
+		s.exchangeIDs[order.ExchangeOrderID] = order.ID
+	}
+}
+
+func (s *Store) SetPosition(position domain.Position) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.positions[position.Symbol] = position
+}
+
+func (s *Store) SetAccountState(account domain.AccountState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.account = account
+}
+
+func (s *Store) AccountState() domain.AccountState {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.account
+}
+
+func (s *Store) AppendReconciliationReport(report domain.ReconciliationReport) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reports = append(s.reports, report)
+}
+
+func (s *Store) ReconciliationReports() []domain.ReconciliationReport {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]domain.ReconciliationReport, len(s.reports))
+	copy(out, s.reports)
+	return out
+}
+
+func (s *Store) OpenOrdersBySymbol(symbol string) []domain.Order {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]domain.Order, 0)
+	for _, order := range s.orders {
+		if order.Symbol != symbol {
+			continue
+		}
+		switch order.Status {
+		case domain.OrderNew, domain.OrderSent, domain.OrderAck, domain.OrderPartial:
+			out = append(out, order)
+		}
+	}
+	return out
+}
+
 func (s *Store) Order(orderID string) (domain.Order, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	order, ok := s.orders[orderID]
+	return order, ok
+}
+
+func (s *Store) OrderByIdempotency(idempotencyKey string) (domain.Order, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	orderID, ok := s.idempotency[idempotencyKey]
+	if !ok {
+		return domain.Order{}, false
+	}
+	order, ok := s.orders[orderID]
+	return order, ok
+}
+
+func (s *Store) OrderByExchangeID(exchangeOrderID string) (domain.Order, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	orderID, ok := s.exchangeIDs[exchangeOrderID]
+	if !ok {
+		return domain.Order{}, false
+	}
 	order, ok := s.orders[orderID]
 	return order, ok
 }
