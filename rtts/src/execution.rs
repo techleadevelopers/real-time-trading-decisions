@@ -1,3 +1,5 @@
+pub mod queue_engine;
+
 use crate::{
     accounting::{
         latency::LatencyBreakdown,
