@@ -4,6 +4,7 @@ use crate::{
         ledger::LiquidityFlag,
     },
     config::Config,
+    execution_controller::{ExecutionControllerEvent, OrderLifecycleState},
     metrics::Metrics,
     types::{CompetitionFlag, ExecutionMode, ExecutionTruth, FillEvent, MarkoutSnapshot, MarketRegime, MicroExitSignal, QueueEstimate, Side},
 };
@@ -40,10 +41,14 @@ struct ControlPlaneExecutionUpdate {
 
 #[derive(Debug, Deserialize)]
 struct ControlPlaneOrder {
+    id: Option<String>,
+    idempotency_key: Option<String>,
     symbol: String,
     side: String,
     size: f64,
     price: Option<f64>,
+    status: Option<String>,
+    filled: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -81,6 +86,7 @@ pub async fn run(
     cfg: Config,
     fill_tx: Sender<FillEvent>,
     truth_fill_tx: Sender<FillEvent>,
+    controller_tx: Sender<ExecutionControllerEvent>,
     metrics: Arc<Metrics>,
 ) {
     let ws_url = cfg.control_plane_ws.clone();
@@ -92,7 +98,7 @@ pub async fn run(
                     match message {
                         Ok(msg) if msg.is_text() => {
                             if let Ok(update) = serde_json::from_str::<WsUpdate>(msg.to_text().unwrap_or_default()) {
-                                handle_update(update, &fill_tx, &truth_fill_tx, &metrics).await;
+                                handle_update(update, &fill_tx, &truth_fill_tx, &controller_tx, &metrics).await;
                             }
                         }
                         Ok(_) => {}
@@ -113,6 +119,7 @@ async fn handle_update(
     update: WsUpdate,
     fill_tx: &Sender<FillEvent>,
     truth_fill_tx: &Sender<FillEvent>,
+    controller_tx: &Sender<ExecutionControllerEvent>,
     metrics: &Metrics,
 ) {
     if update.kind != "execution_update" {
@@ -121,6 +128,42 @@ async fn handle_update(
     let Ok(payload) = serde_json::from_value::<ControlPlaneExecutionUpdate>(update.data) else {
         return;
     };
+    let order_id = payload.order.id.clone().unwrap_or_default();
+    let partial_fill_ratio = payload
+        .execution
+        .as_ref()
+        .map(|value| value.partial_fill_ratio)
+        .unwrap_or_else(|| payload.order.filled.unwrap_or_default() / payload.order.size.max(1e-9));
+    let event = ExecutionControllerEvent {
+        order_id: order_id.clone(),
+        idempotency_key: payload.order.idempotency_key.clone(),
+        symbol: payload.order.symbol.clone(),
+        status: parse_order_status(payload.order.status.as_deref()),
+        filled_qty_delta: payload
+            .ledger
+            .as_ref()
+            .map(|value| value.quantity)
+            .unwrap_or_default(),
+        cumulative_filled_qty: payload.order.filled.unwrap_or_default(),
+        remaining_qty: (payload.order.size - payload.order.filled.unwrap_or_default()).max(0.0),
+        partial_fill_ratio,
+        slippage_bps: payload
+            .execution
+            .as_ref()
+            .map(|value| value.slippage_real)
+            .unwrap_or_default(),
+        competition_flag: parse_competition_flag(
+            payload.execution.as_ref().and_then(|value| value.competition_flag.as_deref()),
+        ),
+        latency_us: payload
+            .execution
+            .as_ref()
+            .map(|value| value.latency_breakdown.full_fill_latency / 1_000)
+            .unwrap_or_default(),
+        event_ts: non_negative_ms(payload.last_fill_timestamp_ms.max(payload.ack_timestamp_ms)),
+    };
+    let _ = controller_tx.try_send(event);
+
     let (Some(ledger), Some(execution)) = (payload.ledger, payload.execution) else {
         return;
     };
@@ -227,6 +270,18 @@ fn infer_execution_mode(price: Option<f64>) -> ExecutionMode {
         ExecutionMode::Passive
     } else {
         ExecutionMode::Aggressive
+    }
+}
+
+fn parse_order_status(raw: Option<&str>) -> OrderLifecycleState {
+    match raw.unwrap_or("NEW") {
+        "SENT" => OrderLifecycleState::Sent,
+        "ACK" => OrderLifecycleState::Ack,
+        "PARTIAL" => OrderLifecycleState::Partial,
+        "FILLED" => OrderLifecycleState::Filled,
+        "CANCELED" => OrderLifecycleState::Canceled,
+        "REJECTED" => OrderLifecycleState::Rejected,
+        _ => OrderLifecycleState::New,
     }
 }
 
