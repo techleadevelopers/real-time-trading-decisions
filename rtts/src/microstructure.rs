@@ -100,6 +100,10 @@ pub async fn run(
             context,
             flow,
             timing,
+            trigger: crate::types::TriggerSnapshot::default(),
+            reversal: crate::types::ReversalSnapshot::default(),
+            reversal_classifier: crate::types::ReversalClassifierSnapshot::default(),
+            entry_scoring: crate::types::EntryScoringSnapshot::default(),
             stale,
         };
 
