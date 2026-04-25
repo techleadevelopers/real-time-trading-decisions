@@ -31,6 +31,11 @@ pub struct Metrics {
     pub false_positives_avoided: IntCounterVec,
     pub position_size: GaugeVec,
     pub drawdown: GaugeVec,
+    pub avg_time_to_fill_ms: HistogramVec,
+    pub cancel_replace_ratio: HistogramVec,
+    pub execution_efficiency: HistogramVec,
+    pub fill_expected_divergence: HistogramVec,
+    pub aborted_due_to_decay_total: IntCounterVec,
 }
 
 impl Metrics {
@@ -141,6 +146,30 @@ impl Metrics {
             prometheus::Opts::new("rtts_drawdown", "Current daily drawdown"),
             &["symbol"],
         )?;
+        let avg_time_to_fill_ms = HistogramVec::new(
+            HistogramOpts::new("rtts_avg_time_to_fill_ms", "Observed order time to fill in milliseconds")
+                .buckets(vec![1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1_000.0]),
+            &["symbol"],
+        )?;
+        let cancel_replace_ratio = HistogramVec::new(
+            HistogramOpts::new("rtts_cancel_replace_ratio", "Per-order cancel/replace intensity")
+                .buckets(vec![0.0, 0.25, 0.50, 1.0, 1.5, 2.0, 3.0, 5.0]),
+            &["symbol"],
+        )?;
+        let execution_efficiency = HistogramVec::new(
+            HistogramOpts::new("rtts_execution_efficiency", "Execution efficiency versus expected fill timing")
+                .buckets(vec![-1.0, -0.5, -0.25, 0.0, 0.25, 0.50, 0.75, 1.0]),
+            &["symbol"],
+        )?;
+        let fill_expected_divergence = HistogramVec::new(
+            HistogramOpts::new("rtts_fill_expected_divergence", "Absolute divergence between expected and realized fill progress")
+                .buckets(vec![0.0, 0.05, 0.10, 0.20, 0.35, 0.50, 0.75, 1.0]),
+            &["symbol"],
+        )?;
+        let aborted_due_to_decay_total = IntCounterVec::new(
+            prometheus::Opts::new("rtts_aborted_due_to_decay_total", "Orders aborted after edge decay exceeded half-life"),
+            &["symbol"],
+        )?;
 
         registry.register(Box::new(events_total.clone()))?;
         registry.register(Box::new(decisions_total.clone()))?;
@@ -161,6 +190,11 @@ impl Metrics {
         registry.register(Box::new(false_positives_avoided.clone()))?;
         registry.register(Box::new(position_size.clone()))?;
         registry.register(Box::new(drawdown.clone()))?;
+        registry.register(Box::new(avg_time_to_fill_ms.clone()))?;
+        registry.register(Box::new(cancel_replace_ratio.clone()))?;
+        registry.register(Box::new(execution_efficiency.clone()))?;
+        registry.register(Box::new(fill_expected_divergence.clone()))?;
+        registry.register(Box::new(aborted_due_to_decay_total.clone()))?;
 
         Ok(Arc::new(Self {
             registry,
@@ -183,6 +217,11 @@ impl Metrics {
             false_positives_avoided,
             position_size,
             drawdown,
+            avg_time_to_fill_ms,
+            cancel_replace_ratio,
+            execution_efficiency,
+            fill_expected_divergence,
+            aborted_due_to_decay_total,
         }))
     }
 
