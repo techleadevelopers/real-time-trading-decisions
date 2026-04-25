@@ -77,6 +77,7 @@ const (
 
 type Order struct {
 	ID                   string        `json:"id"`
+	ExchangeOrderID      string        `json:"exchange_order_id,omitempty"`
 	IdempotencyKey       string        `json:"idempotency_key"`
 	Symbol               string        `json:"symbol"`
 	Side                 Side          `json:"side"`
@@ -99,6 +100,11 @@ type Order struct {
 	QueueDelay           time.Duration `json:"queue_delay"`
 	CancelReason         string        `json:"cancel_reason,omitempty"`
 	RejectReason         string        `json:"reject_reason,omitempty"`
+	ExpectedRealizedMarkout float64    `json:"expected_realized_markout,omitempty"`
+	RegimeKind           string        `json:"regime_kind,omitempty"`
+	RegimeVolatility     float64       `json:"regime_volatility,omitempty"`
+	RegimeSpread         float64       `json:"regime_spread,omitempty"`
+	RegimeTrendStrength  float64       `json:"regime_trend_strength,omitempty"`
 }
 
 type FillLedgerEntry struct {
@@ -210,4 +216,29 @@ type RiskStatus struct {
 	AdverseSelectionEMA      float64           `json:"adverse_selection_ema"`
 	SlippageVarianceEMA      float64           `json:"slippage_variance_ema"`
 	ExecutionFailureRateEMA  float64           `json:"execution_failure_rate_ema"`
+}
+
+type AccountState struct {
+	AvailableBalance float64   `json:"available_balance"`
+	Balance          float64   `json:"balance"`
+	UsedMargin       float64   `json:"used_margin"`
+	Leverage         float64   `json:"leverage"`
+	UnrealizedPnL    float64   `json:"unrealized_pnl"`
+	UpdatedAt        time.Time `json:"updated_at"`
+}
+
+func (a AccountState) LeverageOrDefault() float64 {
+	if a.Leverage <= 0 {
+		return 1
+	}
+	return a.Leverage
+}
+
+type ReconciliationReport struct {
+	Matched       bool      `json:"matched"`
+	MissingFills  int       `json:"missing_fills"`
+	OrphanOrders  int       `json:"orphan_orders"`
+	PositionDrift int       `json:"position_drift"`
+	GeneratedAt   time.Time `json:"generated_at"`
+	Details       []string  `json:"details"`
 }
