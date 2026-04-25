@@ -8,7 +8,7 @@ It currently has two distinct layers:
 - `rtts/`: Rust + Tokio real-time trading system focused on event-driven, microstructure-aware scalp execution.
 - `control-plane/`: Go orchestration and real-time control layer for market-data gateway, risk, state, execution routing, REST, and WebSocket operations.
 
-The Rust RTTS is the low-latency decision and execution-intelligence core. It is not candle-based. It consumes trade prints and L2 order book updates, builds microstructure state, evaluates multiple scenarios, and emits execution decisions.
+The Rust RTTS is the real-time decision and execution-intelligence core. It is not candle-based. It consumes trade prints and L2 order book updates, builds microstructure state, separates movement from market intent, classifies reversal/continuation/chop context in real time, runs percent-drop sniper observation plus reversal-flip observation, and emits scalp decisions for short futures moves.
 
 The Go control-plane is the operational brain and the authoritative execution layer. It receives execution requests from Rust, applies idempotency and global risk controls, owns the order lifecycle, emits exchange-derived execution events and fill-ledger entries, maintains reconciliation state, synchronizes exchange-side account state, and forwards approved orders to the exchange API layer.
 
@@ -49,6 +49,7 @@ The Python backend remains useful for slower research workflows:
 - baseline feature calculation
 - deterministic Short Sniper rules
 - logistic regression baseline model
+- RTTS weight export for calibrated reversal/entry models
 - model train/predict endpoints
 - backtest endpoint stubs
 - health/data/model/regime routers
@@ -68,6 +69,7 @@ backend/
     collector.py
     features.py
     models.py
+    execution_learning/export_rtts_weights.py
     rules.py
     market_stream.py
     metrics.py
@@ -100,7 +102,26 @@ http://localhost:8000/docs
 
 ## RTTS: Rust Real-Time Trading System
 
-The Rust crate is a production-oriented microstructure decision engine. It is designed around bounded Tokio channels, deterministic state transitions, external execution truth, ledger-based accounting, continuous statistical edge validation, and competition-aware edge capture control.
+The Rust crate is a production-oriented microstructure scalp decision engine. It is designed around bounded Tokio channels, deterministic state transitions, external execution truth, ledger-based accounting, continuous statistical edge validation, competition-aware edge capture control, and lightweight calibratable models that can be trained offline in Python and executed online in Rust.
+
+### Project Positioning
+
+This system is not trying to be HFT.
+
+It is a microstructure-driven futures scalping engine that competes on:
+
+- order flow reading
+- absorption and exhaustion detection
+- short-horizon timing
+- execution consistency
+- filtering bad trades before they reach execution
+
+It is not designed to compete on:
+
+- colocation
+- private/direct feeds
+- queue priority as a primary edge
+- ultra-low-latency infrastructure races
 
 It shifts the execution path from:
 
@@ -113,6 +134,9 @@ to:
 ```text
 market updates
 -> microstructure state
+-> movement/context observation
+-> reversal classification
+-> entry scoring
 -> adaptive decision
 -> position/risk
 -> multi-scenario meta-decision
@@ -136,6 +160,10 @@ rtts/
     micro_timing.rs      # Spread compression, liquidity pull, bursts, pullbacks
     context_engine.rs    # O(1) market context and regime classification
     microstructure.rs    # Normalized features and regime output
+    trigger_engine.rs    # Percent-drop observation, reversal confirmation, and fast-exit trigger state
+    reversal_engine.rs   # Post-exit reversal observation state machine
+    reversal_classifier.rs # Reversal vs continuation vs chop classifier
+    entry_scoring.rs     # Context-aware enter/wait/skip scoring layer
     adaptive_engine.rs   # Dynamic scoring and adversarial defense
     scenario_simulator.rs # Continuation/reversal/chop estimates
     ev_calculator.rs     # Slippage/latency-adjusted expected value
@@ -154,6 +182,7 @@ rtts/
     symbol_profile.rs    # Per-symbol spread/fill/volatility profile
     execution_smart.rs   # Execution request preparation + control-plane submission
     execution_external.rs # Control-plane WebSocket execution event consumer
+    model_weights.rs     # Versioned runtime weight schema + JSON loader
     accounting/          # Ledger, latency distributions, edge validation, quality, validation
     metrics.rs           # Prometheus text endpoint
     pipeline.rs          # Bounded mpsc wiring
@@ -169,22 +198,27 @@ rtts/
 5. `micro_timing` scores spread compression, liquidity pull, trade bursts, and micro pullbacks to decide whether entry timing is optimal, neutral, waiting, or missed.
 6. `context_engine` classifies regimes: `Normal`, `HighVolatility`, `NewsShock`, `LowLiquidity`, and `TrendExpansion`.
 7. `microstructure` normalizes features online and emits numeric market regime values plus compact `MarketContext`, flow, and timing state.
-8. `adaptive_engine` produces direction, confidence, urgency, expected duration, and pre-trade slippage, while filtering missed timing and reversal-risk flow and degrading decisions when the statistical edge is uncertain, invalid, competitive, or saturated.
-9. `position` consumes externally sourced fills and synchronizes the local position snapshot from accounting truth instead of deriving truth from local execution simulation.
-10. `risk` rejects stale, over-budget, over-risk, and abnormal orders before meta evaluation.
-11. `meta_engine` is the final judge. It simulates continuation/reversal/chop, computes adjusted EV, scores entry quality, estimates competition, waits for confirmation when needed, and returns `Execute`, `Wait`, or `Skip`. It now explicitly avoids saturated edge-crowding states and degrades under competitive conditions.
-12. `queue_position`, `fill_probability`, and `execution_mode` estimate queue position, volume ahead, fill probability, and preferred aggressiveness before any order request leaves Rust.
-13. `execution_smart` prepares the execution request and sends it to the Go control-plane. It no longer generates fills or acts as execution truth.
-14. `execution_external` consumes authoritative `execution_update` events from the control-plane WebSocket feed and forwards external fills into position/accounting/truth processing.
-15. `accounting` computes lot-based realized PnL from fill-ledger entries only. It supports partial fills, mixed maker/taker fees, rebates, funding fields, and unrealized PnL as derived state.
-16. `execution_truth` measures realized markout, slippage, fill quality, edge capture ratio, adverse selection, and per-trade PnL decomposition from external fills only. It feeds online learning with real outcomes and exposes `edge_component`, `execution_loss`, `fees/rebates`, and `adverse_selection_loss`.
-17. `accounting::edge_validation` runs rolling t-tests on realized PnL, KS-tests on expected vs realized edge distributions, tracks edge error moments, edge capture efficiency, confidence intervals, Sharpe-like adjusted returns, and edge half-life, classifies `VALID/UNCERTAIN/INVALID`, classifies competition as `NORMAL/COMPETITIVE/SATURATED`, and computes a dynamic capital multiplier.
-18. `micro_exit` and `markout` evaluate take-profit, momentum fade, adverse flow, liquidity collapse, and 100ms/500ms/1s post-entry quality, but these are not accounting truth.
-19. `symbol_profile` keeps per-symbol spread, fill probability, volatility, and trade-size estimates to adapt execution.
-20. `learning` adjusts thresholds, feature weights, and scaling aggressiveness using execution outcomes and post-trade quality samples.
-21. `accounting::edge_validation` also stores regime-aware memory of reliability, PnL, execution quality, and capture quality so thresholds, sizing, and aggressiveness adapt by regime instead of using one global edge assumption.
-22. Anti-overfitting guards are enforced online: minimum sample size before validation, confidence intervals, noise filtering, and slow EWMA decay factors to avoid reacting to small-sample noise.
-23. `metrics` exposes latency, EV, entry quality, competition score, skipped/executed decisions, slippage, microtrade PnL, hit rate by regime, scale efficiency, position size, drawdown, controller efficiency, cancel/replace intensity, and backpressure.
+8. `trigger_engine` watches local highs, computes percent-drop observation state, and arms sniper observation only when movement becomes interesting. It does not directly encode “drop = buy”; it only marks the market for further classification and emits fast-exit context when markout quality, flow, or timing deteriorate.
+9. `reversal_engine` activates only after profitable short-duration exits and opens a bounded reversal-observation window. It tracks whether a flip from long-to-short or short-to-long is contextually plausible without bypassing the normal entry path.
+10. `reversal_classifier` is the lightweight real-time context model. It separates movement features (`drop_pct`, velocity, burst) from intent features (exhaustion, absorption, timing, liquidity quality) and outputs `reversal_probability`, `continuation_probability`, and `chop_probability`.
+11. `entry_scoring` converts classifier context plus `edge_validation` plus competition state into `Enter/Wait/Skip` style scoring. This is where market context becomes trade intent, rather than treating raw movement as a signal by itself.
+12. `adaptive_engine` produces direction, confidence, urgency, expected duration, and pre-trade slippage, while filtering missed timing and reversal-risk flow, consuming trigger/reversal/classifier/scoring context, and degrading decisions when the statistical edge is uncertain, invalid, competitive, or saturated.
+13. `position` consumes externally sourced fills and synchronizes the local position snapshot from accounting truth instead of deriving truth from local execution simulation.
+14. `risk` rejects stale, over-budget, over-risk, and abnormal orders before meta evaluation.
+15. `meta_engine` is the final judge. It simulates continuation/reversal/chop, computes adjusted EV, scores entry quality, estimates competition, waits for confirmation when needed, and returns `Execute`, `Wait`, or `Skip`. It now explicitly avoids saturated edge-crowding states and degrades under competitive conditions.
+16. `queue_position`, `fill_probability`, and `execution_mode` estimate queue position, volume ahead, fill probability, and preferred aggressiveness before any order request leaves Rust.
+17. `execution_smart` prepares the execution request and sends it to the Go control-plane. It no longer generates fills or acts as execution truth.
+18. `execution_external` consumes authoritative `execution_update` events from the control-plane WebSocket feed and forwards external fills into position/accounting/truth processing.
+19. `accounting` computes lot-based realized PnL from fill-ledger entries only. It supports partial fills, mixed maker/taker fees, rebates, funding fields, and unrealized PnL as derived state.
+20. `execution_truth` measures realized markout, slippage, fill quality, edge capture ratio, adverse selection, `execution_alpha`, and per-trade PnL decomposition from external fills only. It feeds online learning with real outcomes and now fans out learning samples to both adaptive validation and reversal observation.
+21. `accounting::edge_validation` runs rolling t-tests on realized PnL, KS-tests on expected vs realized edge distributions, tracks edge error moments, edge capture efficiency, confidence intervals, Sharpe-like adjusted returns, edge half-life, negative capture streaks, and execution-alpha drift, classifies `VALID/UNCERTAIN/INVALID`, classifies competition as `NORMAL/COMPETITIVE/SATURATED`, and computes a dynamic capital multiplier.
+22. `model_weights` loads a versioned JSON weight schema at startup so reversal classification and entry scoring can be calibrated offline in Python and executed online in Rust without network calls or Python latency.
+23. `micro_exit` and `markout` evaluate take-profit, momentum fade, adverse flow, liquidity collapse, and 100ms/500ms/1s post-entry quality, but these are not accounting truth.
+24. `symbol_profile` keeps per-symbol spread, fill probability, volatility, and trade-size estimates to adapt execution.
+25. `learning` adjusts thresholds, feature weights, and scaling aggressiveness using execution outcomes and post-trade quality samples.
+26. `accounting::edge_validation` also stores regime-aware memory of reliability, PnL, execution quality, and capture quality so thresholds, sizing, and aggressiveness adapt by regime instead of using one global edge assumption.
+27. Anti-overfitting guards are enforced online: minimum sample size before validation, confidence intervals, noise filtering, and slow EWMA decay factors to avoid reacting to small-sample noise.
+28. `metrics` exposes latency, EV, entry quality, competition score, skipped/executed decisions, slippage, microtrade PnL, hit rate by regime, scale efficiency, position size, drawdown, controller efficiency, cancel/replace intensity, and backpressure.
 
 ---
 
@@ -226,6 +260,9 @@ $env:RTTS_MAX_EXECUTION_LATENCY_US="8000"
 $env:RTTS_MAX_CONSECUTIVE_LOSSES="3"
 $env:RTTS_CONTROL_PLANE_HTTP="http://127.0.0.1:8088"
 $env:RTTS_CONTROL_PLANE_WS="ws://127.0.0.1:8088/ws"
+$env:RTTS_TRIGGER_DROP_PCT="0.015"
+$env:RTTS_TRIGGER_RESET_PCT="0.025"
+$env:RTTS_MODEL_WEIGHTS_PATH="data/models/rtts_reversal_weights.json"
 ```
 
 Validation:
@@ -258,6 +295,13 @@ Before an order reaches execution, the system checks:
 - recent execution quality
 - queue position estimate
 - fill probability
+- percent drop from adaptive local highs
+- movement score vs intent score
+- reversal vs continuation vs chop classification
+- selling-pressure weakening confirmation
+- bid/ask absorption and liquidity stabilization
+- calibrated entry scoring from offline-trained weights
+- trigger-based fast exit conditions
 - execution mode
 - adverse selection risk
 - symbol-specific spread/fill behavior
@@ -454,13 +498,22 @@ Remaining production work still includes:
 - exchange-specific position/leverage calibration under real margin settings
 - shadow/live soak testing before enabling real capital
 
-This system still loses to institutional HFT firms on:
+This system is not trying to compete as institutional HFT.
+
+It is built to win in a different lane:
+
+- microstructure reading
+- exhaustion and absorption detection
+- short-horizon timing
+- context-aware filtering
+- execution consistency through the control-plane
+
+It still does not compete on:
 
 - colocation
 - direct/private market data
 - hardware timestamping
 - kernel bypass networking
-- queue modeling
-- venue-specific execution infrastructure
+- venue-dominant queue infrastructure
 
-The goal here is not to pretend to be colocated HFT. The goal is to enforce better decision quality, reduce false positives, control execution risk, and avoid trading when the edge is not statistically validated.
+The goal is not to pretend to be colocated HFT. The goal is to build a disciplined futures scalping engine that improves decision quality, reduces false positives, controls execution risk, and avoids overtrading when the edge is not statistically validated.
