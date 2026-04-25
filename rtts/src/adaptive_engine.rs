@@ -1,9 +1,11 @@
 use crate::{
     accounting::edge_validation::{EdgeState, EdgeValidationEngine, EdgeValidationSnapshot},
     config::Config,
+    entry_scoring::EntryScoring,
     execution_controller::ExecutionControlFeedback,
     learning::LearningState,
     metrics::Metrics,
+    reversal_classifier::ReversalClassifier,
     types::{
         Decision, Direction, Event, FlowSignal, LearningSample, MarketEvent, MicrostructureFrame,
         ScoredDecision, Side, TimingSignal,
@@ -90,6 +92,18 @@ fn score_frame(
     trading_disabled: bool,
     edge_snapshot: EdgeValidationSnapshot,
 ) -> ScoredDecision {
+    let classifier = {
+        let snapshot = frame.reversal_classifier;
+        if snapshot.reversal_probability > 0.0
+            || snapshot.continuation_probability > 0.0
+            || snapshot.chop_probability > 0.0
+        {
+            snapshot
+        } else {
+            ReversalClassifier::classify(frame)
+        }
+    };
+    let entry_scoring = EntryScoring::evaluate(frame, &edge_snapshot);
     let weights = learning.weights(&frame.regime);
     let direction = infer_direction(frame);
     let side_factor = match direction {
@@ -155,6 +169,12 @@ fn score_frame(
     ) * edge_degrade
         * (1.0 - edge_snapshot.competition_score * 0.35);
 
+    let trigger_long_ready = entry_scoring.enter_long
+        && frame.reversal.state == crate::types::ReversalState::Idle
+        && classifier.ready_long;
+    let reversal_ready = entry_scoring.enter_long || entry_scoring.enter_short;
+    let trigger_exit = frame.trigger.should_exit;
+
     let decision = if trading_disabled
         || edge_snapshot.edge_state == EdgeState::Invalid
         || edge_snapshot.competition_state == crate::types::CompetitionState::Saturated
@@ -162,6 +182,12 @@ fn score_frame(
         Decision::Ignore
     } else if stale_or_slow {
         Decision::Ignore
+    } else if trigger_exit {
+        Decision::Exit
+    } else if reversal_ready {
+        Decision::EnterSmall
+    } else if trigger_long_ready && direction != Direction::Short {
+        Decision::EnterSmall
     } else if frame.timing.signal == TimingSignal::Missed {
         Decision::Ignore
     } else if frame.flow.signal == FlowSignal::ReversalRisk {
@@ -182,7 +208,29 @@ fn score_frame(
         Decision::Ignore
     };
 
-    let market = market_from_frame(frame, direction);
+    let market = market_from_frame(
+        frame,
+        if entry_scoring.enter_short {
+            Direction::Short
+        } else if entry_scoring.enter_long && frame.reversal.state != crate::types::ReversalState::Idle {
+            frame.reversal.direction
+        } else if trigger_long_ready {
+            Direction::Long
+        } else {
+            direction
+        },
+    );
+    let final_direction = if entry_scoring.enter_short {
+        Direction::Short
+    } else if entry_scoring.enter_long && frame.reversal.state != crate::types::ReversalState::Idle {
+        frame.reversal.direction
+    } else if entry_scoring.enter_long {
+        Direction::Long
+    } else if trigger_long_ready {
+        Direction::Long
+    } else {
+        direction
+    };
     ScoredDecision {
         market,
         event,
@@ -191,14 +239,32 @@ fn score_frame(
         context: frame.context.clone(),
         flow: frame.flow,
         timing: frame.timing,
-        direction,
-        confidence,
+        direction: final_direction,
+        confidence: if reversal_ready {
+            confidence.max(entry_scoring.confidence.max(frame.reversal.confidence).max(0.68))
+        } else if trigger_long_ready {
+            confidence.max(entry_scoring.confidence.max(0.72))
+        } else {
+            confidence
+        },
         continuation_prob: score,
-        reversal_prob: (1.0 - score) * (0.5 + adversarial_risk * 0.5),
-        score,
+        reversal_prob: classifier.reversal_probability.max((1.0 - score) * (0.5 + adversarial_risk * 0.5)),
+        score: if reversal_ready {
+            (score + entry_scoring.score * 0.18 + entry_scoring.expected_edge * 0.10).clamp(0.0, 1.0)
+        } else if trigger_long_ready {
+            (score + entry_scoring.score * 0.12 + frame.trigger.expected_edge * 0.08).clamp(0.0, 1.0)
+        } else {
+            score
+        },
         decision,
         expected_duration_ms,
-        urgency,
+        urgency: if reversal_ready {
+            urgency.max(0.62 + entry_scoring.score * 0.10)
+        } else if trigger_long_ready {
+            urgency.max(0.60 + entry_scoring.score * 0.08)
+        } else {
+            urgency
+        },
         expected_slippage_bps,
         data_latency_ms,
         adversarial_risk,
@@ -206,9 +272,15 @@ fn score_frame(
         edge_regime: edge_snapshot.edge_regime,
         edge_reliability_score: edge_snapshot.edge_reliability_score,
         edge_half_life_samples: edge_snapshot.edge_half_life_samples,
+        edge_capture_mean: edge_snapshot.edge_capture_mean,
+        negative_capture_streak: edge_snapshot.negative_capture_streak,
+        execution_alpha_mean: edge_snapshot.execution_alpha_mean,
+        markout_degradation_score: edge_snapshot.adverse_selection_loss_mean
+            + edge_snapshot.execution_loss_mean.min(1.0) * 0.25,
         dynamic_size_multiplier: edge_snapshot.position_size_multiplier,
         competition_state: edge_snapshot.competition_state,
         competition_score: edge_snapshot.competition_score,
+        trading_enabled: edge_snapshot.trading_enabled,
         fill_probability: crate::types::FillProbabilityClass::LowFill,
     }
 }
