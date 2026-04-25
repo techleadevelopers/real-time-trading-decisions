@@ -1,6 +1,7 @@
 use crate::{
     adaptive_engine, config::Config, execution_controller, execution_external, execution_smart,
     execution_truth, ingestion, meta_engine, metrics::Metrics, microstructure, position, risk,
+    reversal_classifier, reversal_engine, trigger_engine,
     types::MarketUpdate,
 };
 use anyhow::{Context, Result};
@@ -14,6 +15,9 @@ pub async fn run(cfg: Config, metrics: Arc<Metrics>) -> Result<()> {
     let (truth_market_tx, truth_market_rx) = mpsc::channel(cfg.channel_capacity);
     let (controller_market_tx, controller_market_rx) = mpsc::channel(cfg.channel_capacity);
     let (micro_tx, micro_rx) = mpsc::channel(cfg.channel_capacity);
+    let (trigger_tx, trigger_rx) = mpsc::channel(cfg.channel_capacity);
+    let (reversal_tx, reversal_rx) = mpsc::channel(cfg.channel_capacity);
+    let (classifier_tx, classifier_rx) = mpsc::channel(cfg.channel_capacity);
     let (decision_tx, decision_rx) = mpsc::channel(cfg.channel_capacity);
     let (intent_tx, intent_rx) = mpsc::channel(cfg.channel_capacity);
     let (risk_tx, risk_rx) = mpsc::channel(cfg.channel_capacity);
@@ -24,6 +28,7 @@ pub async fn run(cfg: Config, metrics: Arc<Metrics>) -> Result<()> {
     let (controller_exec_tx, controller_exec_rx) = mpsc::channel(cfg.channel_capacity);
     let (controller_feedback_tx, controller_feedback_rx) = mpsc::channel(cfg.channel_capacity);
     let (learning_tx, learning_rx) = mpsc::channel(cfg.channel_capacity);
+    let (learning_reversal_tx, learning_reversal_rx) = mpsc::channel(cfg.channel_capacity);
 
     let metrics_addr: SocketAddr = cfg
         .metrics_addr
@@ -52,9 +57,26 @@ pub async fn run(cfg: Config, metrics: Arc<Metrics>) -> Result<()> {
         micro_tx,
         metrics.clone(),
     ));
-    tokio::spawn(adaptive_engine::run(
+    tokio::spawn(trigger_engine::run(
         cfg.clone(),
         micro_rx,
+        trigger_tx,
+        metrics.clone(),
+    ));
+    tokio::spawn(reversal_engine::run(
+        trigger_rx,
+        learning_reversal_rx,
+        reversal_tx,
+        metrics.clone(),
+    ));
+    tokio::spawn(reversal_classifier::run(
+        reversal_rx,
+        classifier_tx,
+        metrics.clone(),
+    ));
+    tokio::spawn(adaptive_engine::run(
+        cfg.clone(),
+        classifier_rx,
         learning_rx,
         controller_feedback_rx,
         decision_tx,
@@ -99,6 +121,7 @@ pub async fn run(cfg: Config, metrics: Arc<Metrics>) -> Result<()> {
         truth_market_rx,
         truth_fill_rx,
         learning_tx,
+        learning_reversal_tx,
         metrics.clone(),
     ));
 
