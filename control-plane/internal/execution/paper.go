@@ -29,8 +29,9 @@ func (p *PaperExchange) SendOrder(ctx context.Context, order domain.Order) ([]Ex
 	ackAt := now.Add(2 * time.Millisecond)
 	steps := []ExchangeStep{
 		{
-			Status:     domain.OrderAck,
-			OccurredAt: ackAt,
+			Status:          domain.OrderAck,
+			OccurredAt:      ackAt,
+			ExchangeOrderID: order.ID,
 		},
 	}
 
@@ -65,10 +66,11 @@ func (p *PaperExchange) SendOrder(ctx context.Context, order domain.Order) ([]Ex
 			event.Status = domain.OrderFilled
 		}
 		steps = append(steps, ExchangeStep{
-			Status:     status,
-			OccurredAt: fill.EventTime,
-			Ledger:     &fill,
-			Execution:  &event,
+			Status:          status,
+			OccurredAt:      fill.EventTime,
+			ExchangeOrderID: order.ID,
+			Ledger:          &fill,
+			Execution:       &event,
 		})
 	}
 	return steps, nil
