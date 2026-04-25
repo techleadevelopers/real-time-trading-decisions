@@ -10,7 +10,7 @@ It currently has two distinct layers:
 
 The Rust RTTS is the low-latency decision and execution-intelligence core. It is not candle-based. It consumes trade prints and L2 order book updates, builds microstructure state, evaluates multiple scenarios, and emits execution decisions.
 
-The Go control-plane is the operational brain and the authoritative execution layer. It receives execution requests from Rust, applies idempotency and global risk controls, owns the order lifecycle, emits exchange-derived execution events and fill-ledger entries, maintains reconciliation state, and forwards approved orders to the exchange API layer.
+The Go control-plane is the operational brain and the authoritative execution layer. It receives execution requests from Rust, applies idempotency and global risk controls, owns the order lifecycle, emits exchange-derived execution events and fill-ledger entries, maintains reconciliation state, synchronizes exchange-side account state, and forwards approved orders to the exchange API layer.
 
 The `frontend/` directory is intentionally private/local and ignored by Git. It is not part of the public repository.
 
@@ -22,7 +22,7 @@ The `frontend/` directory is intentionally private/local and ignored by Git. It 
 neural-edge-trading/
   backend/              # FastAPI research and model API
   rtts/                 # Rust real-time trading system
-  control-plane/        # Go orchestration and execution control service
+  control-plane/        # Go orchestration, BingX execution, and execution control service
   docker-compose.yml    # Backend/db/redis local stack
   .env.example          # Environment template
   README.md             # This file
@@ -184,7 +184,7 @@ rtts/
 20. `learning` adjusts thresholds, feature weights, and scaling aggressiveness using execution outcomes and post-trade quality samples.
 21. `accounting::edge_validation` also stores regime-aware memory of reliability, PnL, execution quality, and capture quality so thresholds, sizing, and aggressiveness adapt by regime instead of using one global edge assumption.
 22. Anti-overfitting guards are enforced online: minimum sample size before validation, confidence intervals, noise filtering, and slow EWMA decay factors to avoid reacting to small-sample noise.
-23. `metrics` exposes latency, EV, entry quality, competition score, skipped/executed decisions, slippage, microtrade PnL, hit rate by regime, scale efficiency, position size, drawdown, and backpressure.
+23. `metrics` exposes latency, EV, entry quality, competition score, skipped/executed decisions, slippage, microtrade PnL, hit rate by regime, scale efficiency, position size, drawdown, controller efficiency, cancel/replace intensity, and backpressure.
 
 ---
 
@@ -272,6 +272,13 @@ Before an order reaches execution, the system checks:
 
 After approval, Rust submits an execution request to the control-plane. The RTTS does not manufacture fills locally. Order acknowledgements, partial fills, final fills, and cancel states come back from the control-plane as external execution events.
 
+The execution controller layer now actively manages live orders after submission:
+
+- re-evaluates queue position, fill probability, elapsed time, and competition on each update
+- issues `Cancel`, `Replace`, `SwitchStrategy`, or `Abort`
+- aborts orders when edge half-life is exceeded
+- feeds execution failures back into adaptive edge validation
+
 The statistical edge engine continuously tests whether trading is justified at all:
 
 - `VALID`: trading allowed under normal risk limits
@@ -304,10 +311,14 @@ Responsibilities:
 - HTTP execution endpoint for Rust RTTS decisions.
 - Idempotency keys per order.
 - Pre-trade risk checks: kill switch, circuit breaker, exposure, position limits, stale signal rejection.
-- In-memory position, order, fill-ledger, and reconciliation state.
+- In-memory position, order, fill-ledger, account, and reconciliation state with durability-ready hooks.
 - Authoritative order lifecycle state machine: `NEW -> SENT -> ACK -> PARTIAL -> FILLED/CANCELED`.
 - Authoritative execution events and fill-ledger entries emitted from the exchange layer.
 - Reconciliation check: `sum(exchange fills) == sum(accounting ledger)`.
+- BingX authenticated REST trading and authenticated WebSocket execution updates.
+- Boot-time reconciliation of open orders, positions, recent fills, and account state before trading starts.
+- Self-trade prevention by symbol and `client_order_id` idempotency.
+- `GET /account/state` for available balance, margin, leverage, and unrealized PnL.
 - REST API and WebSocket live updates.
 
 Structure:
@@ -319,7 +330,7 @@ control-plane/
     api/          # REST and WebSocket gateway
     config/       # env-driven configuration
     domain/       # shared structs
-    execution/    # execution gateway and exchange client interface
+    execution/    # execution gateway plus paper and BingX exchange clients
     marketdata/   # Binance websocket gateway
     pipeline/     # event processing
     risk/         # kill switch, breakers, exposure checks
@@ -353,8 +364,12 @@ GET  /risk
 GET  /execution/ledger
 GET  /execution/events
 GET  /execution/reconciliation
+GET  /account/state
 POST /kill-switch
 POST /execution/requests
+POST /execution/orders/{id}/cancel
+POST /execution/orders/{id}/replace
+POST /execution/orders/{id}/strategy
 GET  /ws
 ```
 
@@ -373,6 +388,16 @@ Example Rust RTTS execution request:
   "reduce_only": false,
   "expected_realized_markout": 1.25
 }
+```
+
+Useful control-plane environment variables:
+
+```text
+EXECUTION_EXCHANGE=bingx
+BINGX_API_KEY=...
+BINGX_SECRET_KEY=...
+BINGX_BASE_URL=https://open-api.bingx.com
+BINGX_WS_URL=wss://open-api-swap.bingx.com
 ```
 
 ---
@@ -412,23 +437,22 @@ Behavior:
 
 This repository is educational and experimental. Crypto is highly volatile. This is not investment advice.
 
-The execution source of truth is now control-plane driven rather than RTTS-simulated. The current exchange implementation is still a paper exchange adapter, but the architectural boundary is now aligned with live trading:
+The execution source of truth is now control-plane driven rather than RTTS-simulated. BingX integration is now wired into the control-plane with authenticated REST submission, authenticated user-stream execution updates, exchange-side account sync, and boot reconciliation.
 
 - RTTS submits requests
 - control-plane owns order lifecycle
-- exchange layer emits fills
+- BingX exchange layer emits fills
 - fill-ledger drives accounting
 - reconciliation verifies ledger consistency
 
 Remaining production work still includes:
 
-- authenticated persistent order sessions
-- exchange-native ACK/cancel/replace reconciliation
 - durable storage for orders, fills, and ledger state
 - venue-specific fee/funding calibration
 - queue position modeling
-- self-trade prevention
 - production kill switches
+- exchange-specific position/leverage calibration under real margin settings
+- shadow/live soak testing before enabling real capital
 
 This system still loses to institutional HFT firms on:
 
