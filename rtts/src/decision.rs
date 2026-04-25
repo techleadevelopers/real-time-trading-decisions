@@ -82,6 +82,10 @@ pub async fn run(
             edge_regime: EdgeRegime::Stable,
             edge_reliability_score: 0.5,
             edge_half_life_samples: 0.0,
+            edge_capture_mean: 0.0,
+            negative_capture_streak: 0,
+            execution_alpha_mean: 0.0,
+            markout_degradation_score: 0.0,
             dynamic_size_multiplier: dynamic_position_size_multiplier(
                 0.5,
                 EdgeState::Uncertain,
@@ -90,6 +94,7 @@ pub async fn run(
             ),
             competition_state: CompetitionState::Normal,
             competition_score: 0.0,
+            trading_enabled: true,
             fill_probability: crate::types::FillProbabilityClass::LowFill,
         };
         if tx.try_send(output.clone()).is_err() {
