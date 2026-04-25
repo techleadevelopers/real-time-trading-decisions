@@ -44,6 +44,16 @@ pub struct Config {
     pub control_plane_http: String,
     #[arg(long, env = "RTTS_CONTROL_PLANE_WS", default_value = "ws://127.0.0.1:8088/ws")]
     pub control_plane_ws: String,
+    #[arg(long, env = "RTTS_MAX_CANCEL_PER_ORDER", default_value_t = 2)]
+    pub max_cancel_per_order: u32,
+    #[arg(long, env = "RTTS_MAX_REPLACE_PER_ORDER", default_value_t = 3)]
+    pub max_replace_per_order: u32,
+    #[arg(long, env = "RTTS_EXECUTION_ACTION_COOLDOWN_MS", default_value_t = 40)]
+    pub execution_action_cooldown_ms: u64,
+    #[arg(long, env = "RTTS_QUEUE_REPLACE_VOLUME_FACTOR", default_value_t = 1.35)]
+    pub queue_replace_volume_factor: f64,
+    #[arg(long, env = "RTTS_MIN_FILL_PROBABILITY", default_value_t = 0.28)]
+    pub min_fill_probability: f64,
 }
 
 impl Config {
