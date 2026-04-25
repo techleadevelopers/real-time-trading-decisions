@@ -498,9 +498,9 @@ Remaining production work still includes:
 - exchange-specific position/leverage calibration under real margin settings
 - shadow/live soak testing before enabling real capital
 
-This system is not trying to compete as institutional HFT.
+This system is built as a microstructure-driven futures scalping engine.
 
-It is built to win in a different lane:
+It is designed to win through:
 
 - microstructure reading
 - exhaustion and absorption detection
@@ -508,12 +508,4 @@ It is built to win in a different lane:
 - context-aware filtering
 - execution consistency through the control-plane
 
-It still does not compete on:
-
-- colocation
-- direct/private market data
-- hardware timestamping
-- kernel bypass networking
-- venue-dominant queue infrastructure
-
-The goal is not to pretend to be colocated HFT. The goal is to build a disciplined futures scalping engine that improves decision quality, reduces false positives, controls execution risk, and avoids overtrading when the edge is not statistically validated.
+It is not designed around infrastructure races. The goal is to build a disciplined futures scalping engine that improves decision quality, reduces false positives, controls execution risk, and avoids overtrading when the edge is not statistically validated.
