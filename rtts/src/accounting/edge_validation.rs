@@ -1,4 +1,7 @@
-use crate::types::{CompetitionState, LearningSample, MarketRegime};
+use crate::{
+    execution_controller::ExecutionFailureReason,
+    types::{CompetitionState, LearningSample, MarketRegime},
+};
 use std::collections::{HashMap, VecDeque};
 
 const DEFAULT_WINDOW: usize = 128;
@@ -99,6 +102,7 @@ pub struct EdgeValidationEngine {
     competition_states: VecDeque<CompetitionState>,
     negative_capture_streak: usize,
     regime_memory: HashMap<&'static str, RegimeMemory>,
+    failure_ema: f64,
 }
 
 impl Default for EdgeValidationEngine {
@@ -129,7 +133,20 @@ impl EdgeValidationEngine {
             competition_states: VecDeque::with_capacity(capacity),
             negative_capture_streak: 0,
             regime_memory: HashMap::new(),
+            failure_ema: 0.0,
         }
+    }
+
+    pub fn observe_failure(&mut self, reason: ExecutionFailureReason) {
+        let severity = match reason {
+            ExecutionFailureReason::QueueTooDeep => 0.35,
+            ExecutionFailureReason::Outbid => 0.55,
+            ExecutionFailureReason::LatencyTooHigh => 0.65,
+            ExecutionFailureReason::CompetitionSpike => 0.80,
+            ExecutionFailureReason::LiquidityPull => 0.70,
+            ExecutionFailureReason::NoFillTimeout => 0.75,
+        };
+        self.failure_ema = ewma(self.failure_ema, severity, 0.18);
     }
 
     pub fn observe(&mut self, sample: &LearningSample, drawdown_pct: f64) -> EdgeValidationSnapshot {
@@ -221,6 +238,7 @@ impl EdgeValidationEngine {
             sharpe_like,
             capture_moments.mean,
             competition_score,
+            self.failure_ema,
         );
         let edge_regime = classify_regime(
             reliability,
@@ -312,6 +330,7 @@ impl EdgeValidationEngine {
             sharpe_like,
             capture_moments.mean,
             competition_score,
+            self.failure_ema,
         );
         let edge_half_life_samples =
             estimate_half_life(&self.expected_edges, &self.realized_markouts);
@@ -566,6 +585,7 @@ fn reliability_score(
     sharpe_like: f64,
     capture_mean: f64,
     competition_score: f64,
+    failure_ema: f64,
 ) -> f64 {
     let mean_penalty = (edge_error_mean.abs() / 10.0).clamp(0.0, 1.0);
     let variance_penalty = (edge_error_variance / 25.0).clamp(0.0, 1.0);
@@ -579,6 +599,7 @@ fn reliability_score(
         + 0.20 * sharpe_bonus
         + 0.10 * capture_bonus
         - 0.15 * competition_penalty)
+        .mul_add(1.0 - failure_ema.clamp(0.0, 0.95) * 0.35, 0.0)
         .clamp(0.0, 1.0)
 }
 
