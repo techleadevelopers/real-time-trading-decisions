@@ -1,6 +1,7 @@
 use crate::{
-    adaptive_engine, config::Config, execution_external, execution_smart, execution_truth, ingestion, meta_engine,
-    metrics::Metrics, microstructure, position, risk, types::MarketUpdate,
+    adaptive_engine, config::Config, execution_controller, execution_external, execution_smart,
+    execution_truth, ingestion, meta_engine, metrics::Metrics, microstructure, position, risk,
+    types::MarketUpdate,
 };
 use anyhow::{Context, Result};
 use std::{net::SocketAddr, sync::Arc};
@@ -11,13 +12,17 @@ pub async fn run(cfg: Config, metrics: Arc<Metrics>) -> Result<()> {
     let (update_tx, mut update_rx) = mpsc::channel(cfg.channel_capacity);
     let (micro_update_tx, micro_update_rx) = mpsc::channel(cfg.channel_capacity);
     let (truth_market_tx, truth_market_rx) = mpsc::channel(cfg.channel_capacity);
+    let (controller_market_tx, controller_market_rx) = mpsc::channel(cfg.channel_capacity);
     let (micro_tx, micro_rx) = mpsc::channel(cfg.channel_capacity);
     let (decision_tx, decision_rx) = mpsc::channel(cfg.channel_capacity);
     let (intent_tx, intent_rx) = mpsc::channel(cfg.channel_capacity);
     let (risk_tx, risk_rx) = mpsc::channel(cfg.channel_capacity);
     let (meta_tx, meta_rx) = mpsc::channel(cfg.channel_capacity);
+    let (execution_action_tx, execution_action_rx) = mpsc::channel(cfg.channel_capacity);
     let (fill_tx, fill_rx) = mpsc::channel(cfg.channel_capacity);
     let (truth_fill_tx, truth_fill_rx) = mpsc::channel(cfg.channel_capacity);
+    let (controller_exec_tx, controller_exec_rx) = mpsc::channel(cfg.channel_capacity);
+    let (controller_feedback_tx, controller_feedback_rx) = mpsc::channel(cfg.channel_capacity);
     let (learning_tx, learning_rx) = mpsc::channel(cfg.channel_capacity);
 
     let metrics_addr: SocketAddr = cfg
@@ -29,7 +34,14 @@ pub async fn run(cfg: Config, metrics: Arc<Metrics>) -> Result<()> {
     let fanout_metrics = metrics.clone();
     tokio::spawn(async move {
         while let Some(update) = update_rx.recv().await {
-            fanout_market_update(update, &micro_update_tx, &truth_market_tx, &fanout_metrics).await;
+            fanout_market_update(
+                update,
+                &micro_update_tx,
+                &truth_market_tx,
+                &controller_market_tx,
+                &fanout_metrics,
+            )
+            .await;
         }
     });
 
@@ -44,6 +56,7 @@ pub async fn run(cfg: Config, metrics: Arc<Metrics>) -> Result<()> {
         cfg.clone(),
         micro_rx,
         learning_rx,
+        controller_feedback_rx,
         decision_tx,
         metrics.clone(),
     ));
@@ -61,15 +74,25 @@ pub async fn run(cfg: Config, metrics: Arc<Metrics>) -> Result<()> {
         meta_tx,
         metrics.clone(),
     ));
-    tokio::spawn(execution_smart::run(
+    tokio::spawn(execution_controller::run(
         cfg.clone(),
         meta_rx,
+        controller_market_rx,
+        controller_exec_rx,
+        execution_action_tx,
+        controller_feedback_tx,
+        metrics.clone(),
+    ));
+    tokio::spawn(execution_smart::run(
+        cfg.clone(),
+        execution_action_rx,
         metrics.clone(),
     ));
     tokio::spawn(execution_external::run(
         cfg.clone(),
         fill_tx,
         truth_fill_tx,
+        controller_exec_tx,
         metrics.clone(),
     ));
     tokio::spawn(execution_truth::run(
@@ -87,6 +110,7 @@ async fn fanout_market_update(
     update: MarketUpdate,
     micro_tx: &mpsc::Sender<MarketUpdate>,
     truth_tx: &mpsc::Sender<MarketUpdate>,
+    controller_tx: &mpsc::Sender<MarketUpdate>,
     metrics: &Metrics,
 ) {
     if micro_tx.try_send(update.clone()).is_err() {
@@ -96,10 +120,16 @@ async fn fanout_market_update(
             .inc();
         let _ = micro_tx.send(update.clone()).await;
     }
-    if truth_tx.try_send(update).is_err() {
+    if truth_tx.try_send(update.clone()).is_err() {
         metrics
             .channel_backpressure_total
             .with_label_values(&["market_fanout_truth"])
+            .inc();
+    }
+    if controller_tx.try_send(update.clone()).is_err() {
+        metrics
+            .channel_backpressure_total
+            .with_label_values(&["market_fanout_controller"])
             .inc();
     }
 }
