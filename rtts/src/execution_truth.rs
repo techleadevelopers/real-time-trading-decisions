@@ -32,6 +32,7 @@ pub async fn run(
     mut market_rx: Receiver<MarketUpdate>,
     mut fill_rx: Receiver<FillEvent>,
     learning_tx: Sender<LearningSample>,
+    reversal_tx: Sender<LearningSample>,
     metrics: Arc<Metrics>,
 ) {
     let mut pending: VecDeque<PendingFill> = VecDeque::with_capacity(4096);
@@ -60,6 +61,7 @@ pub async fn run(
                         ts,
                         price,
                         &learning_tx,
+                        &reversal_tx,
                         &metrics,
                         &mut edge_reliability,
                         &mut latency_distributions,
@@ -76,6 +78,7 @@ fn update_pending(
     market_ts: u64,
     market_price: f64,
     learning_tx: &Sender<LearningSample>,
+    reversal_tx: &Sender<LearningSample>,
     metrics: &Metrics,
     edge_reliability: &mut EdgeReliabilityModel,
     latency_distributions: &mut LatencyDistributions,
@@ -115,7 +118,8 @@ fn update_pending(
                 .microtrade_pnl
                 .with_label_values(&[&event.symbol])
                 .observe(sample.pnl);
-            let _ = learning_tx.try_send(sample);
+            let _ = learning_tx.try_send(sample.clone());
+            let _ = reversal_tx.try_send(sample);
             info!(
                 symbol = event.symbol,
                 fill_quality = event.fill_quality,
@@ -168,6 +172,7 @@ fn learning_sample_from_event(event: &ExecutionEvent) -> LearningSample {
     let realized_pnl = event.markout_curve.pnl_500ms - event.slippage_real.max(0.0);
     let edge_component = event.expected_markout.max(0.0);
     let execution_loss = (event.expected_markout - realized_pnl).max(0.0);
+    let execution_alpha = realized_pnl - event.expected_markout;
     let fees_rebates_component =
         -event.fees_paid + event.rebates_received - event.funding_cost;
     let adverse_selection_loss = (-event.markout_curve.pnl_100ms).max(0.0)
@@ -187,6 +192,7 @@ fn learning_sample_from_event(event: &ExecutionEvent) -> LearningSample {
         pnl: realized_pnl,
         expected_markout: event.expected_markout,
         realized_markout: event.markout_curve.pnl_500ms,
+        execution_alpha,
         fill_ratio: event.truth.partial_fill_ratio.clamp(0.0, 1.0),
         fees_paid: event.fees_paid,
         rebates_received: event.rebates_received,
@@ -296,5 +302,43 @@ fn competition_state(event: &ExecutionEvent) -> CompetitionState {
         CompetitionFlag::RepeatedOutbid | CompetitionFlag::PartialFillToxicity => {
             CompetitionState::Saturated
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        accounting::latency::LatencyBreakdown,
+        types::{ExecutionTruth, MarketRegime},
+    };
+
+    #[test]
+    fn execution_alpha_correctly_computed() {
+        let event = ExecutionEvent {
+            symbol: "BTCUSDT".to_string(),
+            side: Side::Buy,
+            fill_quality: 0.8,
+            slippage_real: 1.0,
+            adverse_selection_score: 0.1,
+            markout_curve: MarkoutSnapshot {
+                pnl_100ms: 2.5,
+                pnl_500ms: 3.0,
+                pnl_1s: 3.0,
+                pnl_5s: 3.0,
+            },
+            execution_latency_us: 1_000,
+            latency_breakdown: LatencyBreakdown::default(),
+            expected_markout: 2.0,
+            fees_paid: 0.0,
+            rebates_received: 0.0,
+            funding_cost: 0.0,
+            regime: MarketRegime::default(),
+            competition_flag: CompetitionFlag::None,
+            truth: ExecutionTruth::default(),
+        };
+        let sample = learning_sample_from_event(&event);
+        assert!((sample.pnl - 2.0).abs() < 1e-9);
+        assert!((sample.execution_alpha - 0.0).abs() < 1e-9);
     }
 }
