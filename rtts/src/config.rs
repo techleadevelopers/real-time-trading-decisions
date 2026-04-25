@@ -54,6 +54,12 @@ pub struct Config {
     pub queue_replace_volume_factor: f64,
     #[arg(long, env = "RTTS_MIN_FILL_PROBABILITY", default_value_t = 0.28)]
     pub min_fill_probability: f64,
+    #[arg(long, env = "RTTS_TRIGGER_DROP_PCT", default_value_t = 0.015)]
+    pub trigger_drop_pct: f64,
+    #[arg(long, env = "RTTS_TRIGGER_RESET_PCT", default_value_t = 0.025)]
+    pub trigger_reset_pct: f64,
+    #[arg(long, env = "RTTS_MODEL_WEIGHTS_PATH", default_value = "")]
+    pub model_weights_path: String,
 }
 
 impl Config {
