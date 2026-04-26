@@ -1,0 +1,72 @@
+modules = ["rust-stable", "go-1.21", "python-3.12", "nodejs-20"]
+[agent]
+expertMode = true
+stack = "BEST_EFFORT_FALLBACK"
+
+[nix]
+channel = "stable-25_05"
+
+[userenv]
+
+[userenv.shared]
+EXCHANGE = "BINANCE"
+BINANCE_BASE_URL = "https://api.binance.com"
+DEFAULT_SYMBOL = "BTCUSDT"
+DEFAULT_INTERVAL = "1m"
+CANDLES_LIMIT = "500"
+CANDLES_CACHE_SEC = "15"
+HTTP_RETRIES = "2"
+HTTP_BACKOFF_BASE = "0.6"
+REGIME_SNAPSHOT_TTL_SEC = "120"
+API_ALLOW_ORIGINS = "*"
+REGIME_CACHE_TTL_SEC = "300"
+REGIME_FUNDING_CACHE_TTL_SEC = "180"
+REGIME_PERSIST = "0"
+REGIME_HISTORY_USE_MV = "0"
+REGIME_REFRESH_ON_READ = "0"
+COINGECKO_BASE = "https://api.coingecko.com/api/v3"
+BINANCE_FAPI_BASE = "https://fapi.binance.com"
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Start application"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Backend Python"
+
+[[workflows.workflow]]
+name = "Start application"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd frontend && npm run dev"
+waitForPort = 5000
+
+[workflows.workflow.metadata]
+outputType = "webview"
+
+[[workflows.workflow]]
+name = "Backend Python"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd backend && python3 -m uvicorn app:app --host localhost --port 8000 --reload"
+waitForPort = 8000
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[ports]]
+localPort = 5000
+externalPort = 80
